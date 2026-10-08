@@ -1,0 +1,18 @@
+<Window x:Class="STWin.Views.ExitDialog" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="退出 STWin" Width="480" SizeToContent="Height" ResizeMode="NoResize" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ShowInTaskbar="False" WindowStartupLocation="CenterOwner" UseLayoutRounding="True" FontFamily="Microsoft YaHei UI" FontSize="13">
+  <Grid><Border Margin="16" CornerRadius="18" Background="White" BorderBrush="#E2E8F0" BorderThickness="1">
+    <Border.Effect><DropShadowEffect BlurRadius="24" ShadowDepth="4" Opacity="0.15"/></Border.Effect>
+    <Grid Margin="28">
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Border Width="40" Height="40" Background="#EEF2FF" CornerRadius="12" HorizontalAlignment="Left" Margin="0,0,0,20">
+        <TextBlock Text="&#xE8BB;" FontFamily="Segoe Fluent Icons" FontSize="18" Foreground="#4F46E5" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+      </Border>
+      <TextBlock Grid.Row="1" Text="退出 STWin？" FontSize="21" FontWeight="SemiBold" Foreground="#0F172A"/>
+      <TextBlock x:Name="Description" Grid.Row="2" Foreground="#64748B" TextWrapping="Wrap" LineHeight="23" Margin="0,12,0,28" Text="保留分身，稍后还能继续连接。&#xA;结束分身会关闭其中的应用，请先保存工作。"/>
+      <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button x:Name="KeepAction" Content="保留分身并退出" Background="#4F46E5" Foreground="White" Padding="14,11" Margin="0,0,8,0" Click="KeepClick"/>
+        <Button x:Name="EndAction" Content="结束分身并退出" Background="#FFF1F2" Foreground="#BE4352" Padding="14,11" Click="EndClick"/>
+      </StackPanel>
+    </Grid>
+  </Border></Grid>
+</Window>
