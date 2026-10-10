@@ -71,12 +71,21 @@
         </Button>
       </StackPanel>
     </Grid>
-    <Border x:Name="ErrorBanner" Grid.Row="1" Background="#FFF1F2" BorderBrush="#FFE4E6" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="20,0,20,12" Visibility="Collapsed">
+    <StackPanel Grid.Row="1">
+    <Border x:Name="UpdateBanner" Background="#EEF2FF" BorderBrush="#C7D2FE" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="20,0,20,12" Visibility="Collapsed">
+      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <TextBlock x:Name="UpdateText" TextWrapping="Wrap" Foreground="#4338CA" Margin="0,0,12,0" VerticalAlignment="Center"/>
+        <Button x:Name="UpdateAction" Grid.Column="1" Content="更新" Background="#4F46E5" Foreground="White" Padding="16,8" Click="UpdateClick"/>
+        <Button x:Name="UpdateLater" Grid.Column="2" Content="稍后" Padding="12,8" Margin="8,0,0,0" Click="DismissUpdateClick"/>
+      </Grid>
+    </Border>
+    <Border x:Name="ErrorBanner" Background="#FFF1F2" BorderBrush="#FFE4E6" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="20,0,20,12" Visibility="Collapsed">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center"><TextBlock Text="暂时无法完成操作" Foreground="#9F3546" FontWeight="SemiBold"/><TextBlock x:Name="ErrorText" TextWrapping="Wrap" Foreground="#9F5662" Margin="0,5,12,0"/></StackPanel>
         <Button Grid.Column="1" Content="&#xE711;" FontFamily="Segoe Fluent Icons" AutomationProperties.Name="关闭提示" Foreground="#9F5662" Click="DismissErrorClick" Padding="8" VerticalAlignment="Top"/>
       </Grid>
     </Border>
+    </StackPanel>
     <Grid x:Name="DesktopArea" Grid.Row="2">
       <Grid.Style><Style TargetType="Grid"><Setter Property="Margin" Value="12,0"/><Style.Triggers>
         <DataTrigger Binding="{Binding Visibility, ElementName=DesktopView}" Value="Visible"><Setter Property="Margin" Value="0"/></DataTrigger>
@@ -99,4 +108,3 @@
     </Grid>
   </Grid>
 </Window>
-

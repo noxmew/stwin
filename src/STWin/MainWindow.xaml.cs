@@ -12,6 +12,7 @@ using System.Windows.Threading;
 using STWin.Infrastructure;
 using STWin.Mcp;
 using STWin.Sessions;
+using STWin.Updates;
 using STWin.Windows;
 using STWin.Views;
 using System.Windows.Media;
@@ -43,6 +44,10 @@ public partial class MainWindow : Window
     private bool closeRequested;
     private McpServer? mcpServer;
     private readonly SemaphoreSlim mcpActionGate = new(1, 1);
+    private readonly UpdateService updates = new();
+    private UpdateRelease? availableUpdate;
+    private DownloadedUpdate? downloadedUpdate;
+    private bool updateBusy;
 
     public MainWindow(bool preview = false)
     {
@@ -72,7 +77,17 @@ public partial class MainWindow : Window
         };
         UpdateWindowControls();
         UpdateUi();
-        Loaded += (_, _) => RefreshConnection();
+        updates.UpdateAvailable += release => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (exiting || updateBusy || downloadedUpdate is not null) return;
+            availableUpdate = release;
+            ShowUpdate($"发现新版本 {release.Version}，是否更新？");
+        }));
+        Loaded += (_, _) =>
+        {
+            RefreshConnection();
+            if (!previewMode) updates.Start();
+        };
         timer.Tick += (_, _) => RefreshConnection();
         timer.Start();
         if (!previewMode) StartMcpService();
@@ -205,6 +220,7 @@ public partial class MainWindow : Window
         ElevationButton.Visibility = requiresElevation && !state.HasSession && !state.Connected
             ? Visibility.Visible : Visibility.Collapsed;
         ElevationButton.IsEnabled = !state.Busy;
+        UpdateAction.IsEnabled = !updateBusy && (downloadedUpdate is null || !state.Busy && !controller.Busy);
         if (connectionState == 0 && (nativeFullscreen || hiddenForFullscreen)) SetFullscreenPresentation(false);
     }
     private void SetFullscreenPresentation(bool fullscreen)
@@ -691,7 +707,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            Clipboard.SetText($"STWin 0.1.0\n系统：{Environment.OSVersion}\n运行时：{Environment.Version}\nChild Sessions：{SessionApi.IsEnabled()}\n子会话：{SessionApi.ChildId()?.ToString() ?? "无"}\n连接状态：{host.ConnectionState}\nMCP：{mcpServer?.Endpoint ?? "未启动"}\nMCP 客户端配置：{Path.Combine(Settings.Folder, "mcp-connection.json")}\nRDP 窗口：{connectionBarTracker.LastGeometry}\n最近错误：{lastError}");
+            Clipboard.SetText($"STWin {UpdateRelease.CurrentVersionText}\n系统：{Environment.OSVersion}\n运行时：{Environment.Version}\nChild Sessions：{SessionApi.IsEnabled()}\n子会话：{SessionApi.ChildId()?.ToString() ?? "无"}\n连接状态：{host.ConnectionState}\nMCP：{mcpServer?.Endpoint ?? "未启动"}\nMCP 客户端配置：{Path.Combine(Settings.Folder, "mcp-connection.json")}\nRDP 窗口：{connectionBarTracker.LastGeometry}\n最近错误：{lastError}");
             Status("诊断信息已复制。");
         }
         catch (Exception ex) { Error(ex); }
@@ -707,6 +723,60 @@ public partial class MainWindow : Window
         catch (Exception ex) { Error(ex); }
     }
     private void ExitClick(object sender, RoutedEventArgs e) => Close();
+    private void ShowUpdate(string message)
+    {
+        UpdateText.Text = message;
+        UpdateAction.Content = downloadedUpdate is null ? "更新" : "重启更新";
+        UpdateBanner.Visibility = Visibility.Visible;
+        UpdateLater.IsEnabled = !updateBusy || downloadedUpdate is null;
+        UpdateUi();
+    }
+    private void DismissUpdateClick(object sender, RoutedEventArgs e) => UpdateBanner.Visibility = Visibility.Collapsed;
+    private async void UpdateClick(object sender, RoutedEventArgs e)
+    {
+        if (exiting || updateBusy || availableUpdate is null) return;
+        if (downloadedUpdate is not null && (controller.Busy || UiState.Busy)) return;
+        updateBusy = true;
+        var disconnecting = false;
+        try
+        {
+            if (downloadedUpdate is null)
+            {
+                ShowUpdate($"正在下载 {availableUpdate.Version}，可继续使用桌面分身。");
+                downloadedUpdate = await updates.DownloadAsync(availableUpdate);
+                if (!exiting) ShowUpdate($"{downloadedUpdate.Release.Version} 已下载。是否重启更新？分身中的程序会保留。");
+                return;
+            }
+            ShowUpdate("正在准备更新…");
+            using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, lifetime.Token);
+            lifetime.Token.ThrowIfCancellationRequested();
+            if (controller.Busy || UiState.Busy) throw new InvalidOperationException("正在处理桌面操作，请完成后再重启更新。");
+            SetOperation(DesktopOperation.Disconnecting);
+            disconnecting = true;
+            if (!await controller.ExitAsync(ExitChoice.KeepSession, null, lifetime.Token))
+                throw new InvalidOperationException("桌面连接尚未断开，已取消更新。");
+            using var commitTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            commitTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+            await installer.CommitAsync(commitTimeout.Token);
+            CompleteExit();
+        }
+        catch (OperationCanceledException) when (exiting) { }
+        catch (Exception ex)
+        {
+            Settings.Log($"更新失败：{ex}");
+            if (!exiting) ShowUpdate($"更新未完成：{ex.Message}");
+        }
+        finally
+        {
+            updateBusy = false;
+            if (!exiting)
+            {
+                UpdateLater.IsEnabled = true;
+                if (disconnecting) SetOperation(DesktopOperation.None);
+                else UpdateUi();
+            }
+        }
+    }
     private async Task ExitAsync()
     {
         if (previewMode) { CompleteExit(); return; }
@@ -734,6 +804,7 @@ public partial class MainWindow : Window
         if (exiting) return;
         exiting = true;
         lifetime.Cancel();
+        updates.Dispose();
         timer.Stop();
         mcpServer?.Dispose();
         mcpServer = null;
@@ -756,5 +827,4 @@ public partial class MainWindow : Window
         }));
     }
 }
-
 

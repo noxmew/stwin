@@ -6,6 +6,7 @@ using System.Security.Principal;
 using System.Threading;
 using System.Windows;
 using STWin.Infrastructure;
+using STWin.Updates;
 using STWin.Windows;
 
 namespace STWin;
@@ -15,9 +16,14 @@ public partial class App : Application
     private Mutex? instance;
     private EventWaitHandle? activate;
     private RegisteredWaitHandle? activationWait;
-    protected override void OnStartup(StartupEventArgs e)
+    protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (e.Args.Length > 0 && e.Args[0] == UpdateWorker.Argument)
+        {
+            Shutdown(await UpdateWorker.RunAsync(e.Args));
+            return;
+        }
         if (e.Args.Contains("--smoke-test"))
         {
             var output = Path.Combine(AppContext.BaseDirectory, "smoke-test.txt");
@@ -90,6 +96,8 @@ public partial class App : Application
             };
         }
         window.Show();
+        if (e.Args is ["--update-cleanup", var stageId, var installerText] && int.TryParse(installerText, out var installerId))
+            _ = System.Threading.Tasks.Task.Run(() => UpdateWorker.CleanupAsync(stageId, installerId));
     }
     protected override void OnExit(ExitEventArgs e)
     {
