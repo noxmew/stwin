@@ -9,6 +9,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using STWin.Infrastructure;
+using STWin.Updates;
 
 namespace STWin.Mcp;
 
@@ -174,7 +175,7 @@ internal sealed class McpServer : IDisposable
                 {
                     protocolVersion = version,
                     capabilities = new { tools = new { listChanged = false } },
-                    serverInfo = new { name = "STWin", version = "0.1.0" },
+                    serverInfo = new { name = "STWin", version = UpdateRelease.CurrentVersionText },
                     instructions = "Control the connected STWin desktop clone. Mouse coordinates use pixels from the latest screenshot. run_script submits PowerShell in the clone's interactive desktop."
                 };
                 break;

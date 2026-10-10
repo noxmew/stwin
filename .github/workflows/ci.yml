@@ -1,9 +1,8 @@
-name: CI
+name: Build and publish
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -12,52 +11,90 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: stwin-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Select next public version
+        id: version
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          marker="stwin-action-run:${GITHUB_RUN_ID}"
+          existing="$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
+            --jq ".[] | select((.body // \"\") | contains(\"${marker}\")) | .tag_name")"
+          [[ -z "$existing" ]] || {
+            echo "::error::This workflow run already published ${existing}; inspect that Release before retrying."
+            exit 1
+          }
+
+          tags="$(gh api --paginate "repos/${GH_REPO}/tags?per_page=100" --jq '.[].name')"
+          max_patch=0
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v0\.1\.([0-9]+)$ ]]; then
+              patch=$((10#${BASH_REMATCH[1]}))
+              if (( patch > max_patch )); then max_patch=$patch; fi
+            fi
+          done <<< "$tags"
+          tag="v0.1.$((max_patch + 1))"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
     runs-on: windows-latest
     timeout-minutes: 20
-
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install .NET 10 SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.x
 
-      - name: Publish Windows x64 app
+      - name: Publish Windows app
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
           DOTNET_NOLOGO: '1'
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:IS_RELEASE -eq 'true') {
-            [xml]$project = Get-Content src/STWin/STWin.csproj
-            $expectedTag = "v$($project.Project.PropertyGroup.Version)"
-            if ($env:RELEASE_TAG -ne $expectedTag) {
-              throw "Release tag $env:RELEASE_TAG does not match project version $expectedTag."
-            }
+          $publishArguments = @('publish', 'src/STWin/STWin.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-o', 'artifacts/STWin')
+          if ($env:RELEASE_VERSION) {
+            $publishArguments += "-p:Version=$env:RELEASE_VERSION"
           }
-          dotnet publish src/STWin/STWin.csproj -c Release -r win-x64 --self-contained true -o artifacts/STWin
+          dotnet @publishArguments
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Check single-file output
+      - name: Check executable and version
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
           $files = @(Get-ChildItem -Path artifacts/STWin -File -Recurse)
           if ($files.Count -ne 1 -or !(Test-Path -LiteralPath artifacts/STWin/STWin.exe -PathType Leaf)) {
             throw "Expected only STWin.exe in the publish directory; found: $($files.Name -join ', ')."
           }
+          if ($env:RELEASE_VERSION) {
+            $version = [version]$files[0].VersionInfo.FileVersion
+            if ($version.ToString(3) -ne $env:RELEASE_VERSION) {
+              throw "Executable version $version does not match release version $env:RELEASE_VERSION."
+            }
+          }
 
-      - name: Upload Windows x64 build
+      - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: STWin
@@ -66,13 +103,12 @@ jobs:
           retention-days: 14
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: github.ref == 'refs/heads/main'
+    needs: [version, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
-
     steps:
       - name: Download executable
         uses: actions/download-artifact@v4
@@ -84,9 +120,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: |
+          tags="$(gh api --paginate "repos/${GH_REPO}/tags?per_page=100" --jq '.[].name')"
+          max_patch=0
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v0\.1\.([0-9]+)$ ]]; then
+              patch=$((10#${BASH_REMATCH[1]}))
+              if (( patch > max_patch )); then max_patch=$patch; fi
+            fi
+          done <<< "$tags"
+          [[ "$RELEASE_TAG" == "v0.1.$((max_patch + 1))" ]] || {
+            echo '::error::The public version changed during the build; inspect Releases before retrying.'
+            exit 1
+          }
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          下载 STWin.exe 后直接运行。
+
+          <!-- stwin-action-run:${GITHUB_RUN_ID} -->
+          EOF
           gh release create "$RELEASE_TAG" dist/STWin.exe \
-            --verify-tag \
-            --title "STWin $RELEASE_TAG" \
-            --notes '下载 STWin.exe 后直接运行，无需安装 .NET。'
+            --target "$GITHUB_SHA" --title "$RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+
+          release_json="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}")"
+          size="$(stat -c %s dist/STWin.exe)"
+          jq -e --arg tag "$RELEASE_TAG" --argjson size "$size" \
+            '.tag_name == $tag and .draft == false and .prerelease == false and
+             (.assets | length) == 1 and (.assets[0] | .name == "STWin.exe" and .size == $size and
+             ((.digest // "") | test("^sha256:[0-9a-fA-F]{64}$")))' \
+            <<< "$release_json" > /dev/null
+          commit="$(gh api "repos/${GH_REPO}/commits/${RELEASE_TAG}" --jq '.sha')"
+          [[ "$commit" == "$GITHUB_SHA" ]] || {
+            echo '::error::The published tag does not point to the built source commit.'
+            exit 1
+          }

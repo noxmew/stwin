@@ -14,7 +14,7 @@
     <DebugType>embedded</DebugType>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets/stwin.ico</ApplicationIcon>
-    <Version>0.1.2</Version>
+    <Version>0.1.0</Version>
   </PropertyGroup>
   <ItemGroup><Resource Include="Assets/stwin.ico"/></ItemGroup>
 </Project>
