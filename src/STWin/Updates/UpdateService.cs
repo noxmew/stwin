@@ -15,6 +15,7 @@ internal sealed class UpdateService : IDisposable
     private readonly string executable = Environment.ProcessPath!;
     private readonly object processGate = new();
     private Process? activeWorker;
+    private FileStream? downloadLease;
     private bool started;
     public event Action<UpdateRelease>? UpdateAvailable;
 
@@ -56,6 +57,21 @@ internal sealed class UpdateService : IDisposable
         var output = await RunWorkerAsync(TimeSpan.FromMinutes(10), "download", JsonSerializer.Serialize(release), stageId);
         var download = JsonSerializer.Deserialize<DownloadedUpdate>(output) ?? throw new InvalidDataException("更新进程未返回下载信息。");
         if (download.Release != release || download.StageId != stageId) throw new InvalidDataException("更新下载结果不一致。");
+        await Task.Run(() =>
+        {
+            // Keep a pending update intact until the user chooses to restart or exits.
+            var lease = new FileStream(download.ExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            lock (processGate)
+            {
+                if (lifetime.IsCancellationRequested)
+                {
+                    lease.Dispose();
+                    lifetime.Token.ThrowIfCancellationRequested();
+                }
+                downloadLease?.Dispose();
+                downloadLease = lease;
+            }
+        });
         return download;
     }
 
@@ -123,7 +139,12 @@ internal sealed class UpdateService : IDisposable
     public void Dispose()
     {
         lifetime.Cancel();
-        lock (processGate) { if (activeWorker is not null) StopProcess(activeWorker); }
+        lock (processGate)
+        {
+            if (activeWorker is not null) StopProcess(activeWorker);
+            downloadLease?.Dispose();
+            downloadLease = null;
+        }
     }
 }
 
