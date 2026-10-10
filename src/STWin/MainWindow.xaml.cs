@@ -748,7 +748,7 @@ public partial class MainWindow : Window
                 return;
             }
             ShowUpdate("正在准备更新…");
-            using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, lifetime.Token);
+            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, lifetime.Token);
             lifetime.Token.ThrowIfCancellationRequested();
             if (controller.Busy || UiState.Busy) throw new InvalidOperationException("正在处理桌面操作，请完成后再重启更新。");
             SetOperation(DesktopOperation.Disconnecting);
@@ -827,4 +827,3 @@ public partial class MainWindow : Window
         }));
     }
 }
-

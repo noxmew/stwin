@@ -128,7 +128,7 @@ internal sealed class UpdateService : IDisposable
 }
 
 // The installer belongs to the window until it explicitly hands over the restart.
-internal sealed class UpdateInstaller(Process process, string temporaryPath) : IDisposable
+internal sealed class UpdateInstaller(Process process, string temporaryPath) : IAsyncDisposable
 {
     private bool committed;
 
@@ -178,10 +178,10 @@ internal sealed class UpdateInstaller(Process process, string temporaryPath) : I
         committed = true;
     }
 
-    public void Dispose()
+    public ValueTask DisposeAsync()
     {
-        if (committed) { process.Dispose(); return; }
-        _ = Task.Run(async () =>
+        if (committed) { process.Dispose(); return ValueTask.CompletedTask; }
+        return new ValueTask(Task.Run(async () =>
         {
             try
             {
@@ -197,7 +197,7 @@ internal sealed class UpdateInstaller(Process process, string temporaryPath) : I
                 await FinishCleanupAsync(process, temporaryPath);
                 process.Dispose();
             }
-        });
+        }));
     }
 
     private static async Task FinishCleanupAsync(Process process, string temporary)
