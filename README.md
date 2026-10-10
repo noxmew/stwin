@@ -16,14 +16,6 @@ Windows 桌面分身工具
 STWin.exe help
 ```
 
-在已由 STWin 管理的分身会话中以管理员权限启动程序：
-
-```cmd
-STWin.exe launch "C:\Tools\App.exe" --session 2 --elevated --cwd "C:\Tools" --json -- --option "参数"
-```
-
-将 `2` 替换为 `STWin.exe status` 返回的分身会话 ID。STWin 主程序需已以管理员身份运行；权限不足时命令返回退出码 `5`。`--` 后的内容作为程序参数原样传递，返回信息中的 `elevated` 表示目标进程的实际提权状态。
-
 ## MCP
 
 ```json
