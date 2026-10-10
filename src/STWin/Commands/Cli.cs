@@ -42,6 +42,7 @@ internal static class Cli
         script FILE.ps1 [--output PNG]    向分身 PowerShell 提交脚本，可保存截图
         launch PROGRAM [选项] [-- ARG...] 在分身内启动程序，返回进程 ID、路径和会话 ID
           --cwd DIR / --session ID       指定工作目录 / 核对分身会话 ID；程序参数放在 -- 后
+          --elevated                     以管理员权限启动；STWin 主程序需已以管理员身份运行
         update                            检查更新；无新版本时提示，有新版本时升级并重启
         version / --version              查看版本
         help / --help                    查看帮助
@@ -153,6 +154,7 @@ internal static class Cli
             case ["launch", var program, .. var options]:
                 string? directory = null;
                 uint? launchSession = null;
+                var elevated = false;
                 var programArgs = Array.Empty<string>();
                 for (var index = 0; index < options.Length; index++)
                 {
@@ -161,10 +163,12 @@ internal static class Cli
                         directory = Path.GetFullPath(options[++index]);
                     else if (options[index] == "--session" && launchSession is null && index + 1 < options.Length)
                         launchSession = SessionId(options[++index]);
-                    else throw new ArgumentException("launch 选项为 --cwd DIR、--session ID；程序参数请放在 -- 后。");
+                    else if (options[index] == "--elevated" && !elevated)
+                        elevated = true;
+                    else throw new ArgumentException("launch 选项为 --cwd DIR、--session ID、--elevated；程序参数请放在 -- 后。");
                 }
                 var fileName = program.IndexOfAny(['\\', '/', ':']) >= 0 ? Path.GetFullPath(program) : program;
-                var launch = new Dictionary<string, object> { ["fileName"] = fileName, ["arguments"] = programArgs };
+                var launch = new Dictionary<string, object> { ["fileName"] = fileName, ["arguments"] = programArgs, ["elevated"] = elevated };
                 if (directory is not null) launch["workingDirectory"] = directory;
                 if (launchSession is not null) launch["sessionId"] = launchSession.Value;
                 return Call("launch_program", launch);

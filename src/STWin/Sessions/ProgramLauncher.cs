@@ -14,12 +14,12 @@ using STWin.Windows;
 
 namespace STWin.Sessions;
 
-internal sealed record ProgramLaunchRequest(uint SessionId, string FileName, string[] Arguments, string? WorkingDirectory)
+internal sealed record ProgramLaunchRequest(uint SessionId, string FileName, string[] Arguments, string? WorkingDirectory, bool Elevated)
 {
     public static ProgramLaunchRequest Parse(uint sessionId, JsonElement arguments)
     {
         foreach (var property in arguments.EnumerateObject())
-            if (property.Name is not ("fileName" or "arguments" or "workingDirectory" or "sessionId"))
+            if (property.Name is not ("fileName" or "arguments" or "workingDirectory" or "sessionId" or "elevated"))
                 throw new ArgumentException($"不支持的启动参数：{property.Name}");
         if (!arguments.TryGetProperty("fileName", out var fileName) || fileName.ValueKind != JsonValueKind.String)
             throw new ArgumentException("fileName 必须是程序路径或名称。");
@@ -39,7 +39,14 @@ internal sealed record ProgramLaunchRequest(uint SessionId, string FileName, str
             if (cwd.ValueKind != JsonValueKind.String) throw new ArgumentException("workingDirectory 必须是绝对路径。");
             directory = cwd.GetString();
         }
-        var request = new ProgramLaunchRequest(sessionId, fileName.GetString()!, values.ToArray(), directory);
+        var elevated = false;
+        if (arguments.TryGetProperty("elevated", out var elevation))
+        {
+            if (elevation.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw new ArgumentException("elevated 必须是布尔值。");
+            elevated = elevation.GetBoolean();
+        }
+        var request = new ProgramLaunchRequest(sessionId, fileName.GetString()!, values.ToArray(), directory, elevated);
         request.Validate();
         return request;
     }
@@ -60,7 +67,7 @@ internal sealed record ProgramLaunchRequest(uint SessionId, string FileName, str
 }
 
 internal sealed record LaunchedProgram(int ProcessId, uint SessionId, string FileName, string[] Arguments,
-    string WorkingDirectory, DateTimeOffset StartedAt);
+    string WorkingDirectory, DateTimeOffset StartedAt, bool Elevated);
 
 internal static class ProgramLauncher
 {
@@ -79,6 +86,8 @@ internal static class ProgramLauncher
             var pipeName = $"STWin.launch.{Guid.NewGuid():N}";
             using var identity = WindowsIdentity.GetCurrent();
             var sid = identity.User ?? throw new InvalidOperationException("无法确定当前 Windows 用户。");
+            if (request.Elevated && !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+                throw new UnauthorizedAccessException("以管理员权限启动分身内程序需要 STWin 主程序已以管理员身份运行，请以管理员身份重新启动 STWin 后重试。");
             var security = new PipeSecurity();
             security.SetOwner(sid);
             security.SetAccessRuleProtection(true, false);
@@ -86,7 +95,7 @@ internal static class ProgramLauncher
             // An explicit user ACL also permits the non-elevated helper when STWin is elevated.
             using var pipe = NamedPipeServerStreamAcl.Create(pipeName, PipeDirection.InOut, 1,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 4096, security);
-            using var task = new SessionLaunchTask(pipeName, request.SessionId, sid.Value);
+            using var task = new SessionLaunchTask(pipeName, request.SessionId, sid.Value, request.Elevated);
             await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
             var workerId = SessionProcess.PipeClientProcessId(pipe);
             if (SessionProcess.SessionId(workerId) != request.SessionId ||
@@ -96,6 +105,7 @@ internal static class ProgramLauncher
             await CommandPipe.WriteAsync(pipe, request, CommandPipe.MaximumRequest, token).ConfigureAwait(false);
             var prepared = await ReadResultAsync(pipe, token).ConfigureAwait(false);
             if (prepared.SessionId != request.SessionId) throw new InvalidDataException("程序创建到了错误的会话，已取消启动。");
+            if (request.Elevated && !prepared.Elevated) throw new UnauthorizedAccessException("程序未获得管理员权限，已取消启动。");
             token.ThrowIfCancellationRequested();
             if (SessionApi.ChildId() != request.SessionId) throw new InvalidOperationException("分身会话已变化，已取消启动。");
             await CommandPipe.WriteAsync(pipe, "START", CommandPipe.MaximumRequest, token).ConfigureAwait(false);
@@ -165,7 +175,7 @@ internal sealed class SessionLaunchTask : IDisposable
     private readonly string name;
     private bool registered;
 
-    public SessionLaunchTask(string name, uint sessionId, string userSid)
+    public SessionLaunchTask(string name, uint sessionId, string userSid, bool elevated)
     {
         this.name = name;
         try
@@ -177,7 +187,7 @@ internal sealed class SessionLaunchTask : IDisposable
             dynamic principal = Keep(definition.Principal);
             principal.UserId = userSid;
             principal.LogonType = 3; // TASK_LOGON_INTERACTIVE_TOKEN; no credentials are stored.
-            principal.RunLevel = 0; // Launch with the signed-in user's normal privileges.
+            principal.RunLevel = elevated ? 1 : 0; // TASK_RUNLEVEL_HIGHEST / TASK_RUNLEVEL_LUA
             dynamic settings = Keep(definition.Settings);
             settings.Enabled = true;
             settings.Hidden = true;
@@ -198,7 +208,8 @@ internal sealed class SessionLaunchTask : IDisposable
         catch (COMException ex) when (ex.HResult == unchecked((int)0x80070005))
         {
             Dispose();
-            throw new UnauthorizedAccessException("Windows 拒绝在分身中启动程序，请以管理员身份启动 STWin。", ex);
+            // Keep the permission error as the base exception so the CLI returns exit code 5.
+            throw new UnauthorizedAccessException("Windows 拒绝在分身中启动程序，请以管理员身份启动 STWin。");
         }
         catch { Dispose(); throw; }
     }

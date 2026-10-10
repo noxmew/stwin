@@ -228,7 +228,7 @@ internal sealed class McpServer : IDisposable
         new
         {
             name = "launch_program",
-            description = "Launch an executable in the existing STWin-managed child session without keyboard or clipboard automation. Return the created process ID, executable path, session ID, arguments, working directory and start time. Use an absolute executable path or a program name on PATH. Arguments are passed as individual values without a shell; the program runs with the signed-in user's normal privileges. The RDP connection may be disconnected. Start or connect the clone first.",
+            description = "Launch an executable in the existing STWin-managed child session without keyboard or clipboard automation. Return the created process ID, executable path, session ID, arguments, working directory, start time and actual elevation status. Use an absolute executable path or a program name on PATH. Arguments are passed as individual values without a shell; the program runs with the signed-in user's normal privileges by default. Set elevated to true to run as administrator; the resident STWin process must already be running as administrator. The RDP connection may be disconnected. Start or connect the clone first.",
             inputSchema = new
             {
                 type = "object",
@@ -237,6 +237,7 @@ internal sealed class McpServer : IDisposable
                     fileName = new { type = "string", minLength = 1 },
                     arguments = new { type = "array", items = new { type = "string" }, maxItems = 256 },
                     workingDirectory = new { type = "string", minLength = 1 },
+                    elevated = new { type = "boolean", description = "Run as administrator; requires an elevated STWin host." },
                     sessionId = new { type = "integer", minimum = 1 }
                 },
                 required = new[] { "fileName" },

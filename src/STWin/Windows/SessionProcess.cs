@@ -22,10 +22,12 @@ internal sealed class SessionProcess : IDisposable
 
     public static SessionProcess Prepare(ProgramLaunchRequest request)
     {
+        if (request.Elevated && !IsElevated((uint)Environment.ProcessId))
+            throw new UnauthorizedAccessException("启动助手未获得管理员权限，已取消启动。");
         var directory = request.WorkingDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException($"工作目录不存在：{directory}");
         var startup = new StartupInfo { Size = Marshal.SizeOf<StartupInfo>(), Desktop = "winsta0\\default" };
-        // The helper is already in the child session. No shell or RDP input is involved.
+        // The program inherits the helper's token in the child session, including requested elevation.
         if (!CreateProcessW(null, new StringBuilder(CommandLine(request.FileName, request.Arguments)), IntPtr.Zero,
             IntPtr.Zero, false, 4, IntPtr.Zero, directory, ref startup, out var created)) // CREATE_SUSPENDED
             throw Error("在分身内创建程序失败");
@@ -35,10 +37,12 @@ internal sealed class SessionProcess : IDisposable
         {
             var sessionId = SessionId(created.ProcessId);
             if (sessionId != request.SessionId) throw new InvalidOperationException("程序不在指定分身会话中，已取消启动。");
+            var elevated = IsElevated(process);
+            if (request.Elevated && !elevated) throw new UnauthorizedAccessException("程序未获得管理员权限，已取消启动。");
             var fileName = ImagePath(process);
             if (!GetProcessTimes(process, out var creation, out _, out _, out _)) throw Error("读取程序创建时间失败");
             var information = new LaunchedProgram(checked((int)created.ProcessId), sessionId, fileName, request.Arguments,
-                directory, new DateTimeOffset(DateTime.FromFileTimeUtc(creation)));
+                directory, new DateTimeOffset(DateTime.FromFileTimeUtc(creation)), elevated);
             return new(process, thread, information);
         }
         catch
@@ -77,6 +81,24 @@ internal sealed class SessionProcess : IDisposable
         using var process = OpenProcess(0x1000, false, processId); // PROCESS_QUERY_LIMITED_INFORMATION
         if (process.IsInvalid) throw Error("读取启动助手进程失败");
         return ImagePath(process);
+    }
+
+    private static bool IsElevated(uint processId)
+    {
+        using var process = OpenProcess(0x1000, false, processId); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (process.IsInvalid) throw Error("读取启动助手进程失败");
+        return IsElevated(process);
+    }
+
+    private static bool IsElevated(SafeProcessHandle process)
+    {
+        if (!OpenProcessToken(process, 8, out var token)) throw Error("读取进程令牌失败"); // TOKEN_QUERY
+        using (token)
+        {
+            if (!GetTokenInformation(token, 20, out var elevated, sizeof(int), out _)) // TokenElevation
+                throw Error("读取进程提权状态失败");
+            return elevated != 0;
+        }
     }
 
     private static string ImagePath(SafeProcessHandle process)
@@ -163,6 +185,13 @@ internal sealed class SessionProcess : IDisposable
     private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(SafeProcessHandle process, uint desiredAccess, out SafeAccessTokenHandle token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(SafeAccessTokenHandle token, int informationClass, out int information,
+        int informationLength, out int returnLength);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryFullProcessImageNameW(SafeProcessHandle process, uint flags, StringBuilder fileName, ref uint size);
