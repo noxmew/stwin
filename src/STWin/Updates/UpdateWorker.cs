@@ -141,6 +141,9 @@ internal static class UpdateWorker
             string.Equals(target, download.ExecutablePath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("更新安装程序路径无效。");
         using var parent = Process.GetProcessById(parentId);
+        using var client = download.ClientProcessId == 0 ? null : Process.GetProcessById(download.ClientProcessId);
+        // Hold the CLI process handle before replying so a reused PID cannot delay installation.
+        if (client is not null) _ = client.SafeHandle;
         if (!string.Equals(parent.MainModule?.FileName, target, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("正在运行的程序与更新目标不一致。");
         if ((File.GetAttributes(target) & FileAttributes.ReadOnly) != 0)
@@ -176,7 +179,8 @@ internal static class UpdateWorker
             try
             {
                 using var exitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                await parent.WaitForExitAsync(exitTimeout.Token);
+                await Task.WhenAll(parent.WaitForExitAsync(exitTimeout.Token),
+                    client?.WaitForExitAsync(exitTimeout.Token) ?? Task.CompletedTask);
                 File.Replace(temporary, target, null);
                 var start = new ProcessStartInfo(target) { UseShellExecute = false };
                 start.ArgumentList.Add("--update-cleanup");

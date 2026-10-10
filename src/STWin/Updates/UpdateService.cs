@@ -35,8 +35,7 @@ internal sealed class UpdateService : IDisposable
             {
                 try
                 {
-                    var result = await RunWorkerAsync(TimeSpan.FromSeconds(30), "check");
-                    var release = JsonSerializer.Deserialize<UpdateRelease>(result);
+                    var release = await CheckAsync(lifetime.Token);
                     if (release is not null && release.Validate() > offered)
                     {
                         offered = release.Validate();
@@ -51,22 +50,31 @@ internal sealed class UpdateService : IDisposable
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
     }
 
-    public async Task<DownloadedUpdate> DownloadAsync(UpdateRelease release)
+    public async Task<UpdateRelease?> CheckAsync(CancellationToken cancellationToken = default)
     {
+        var output = await RunWorkerAsync(TimeSpan.FromSeconds(30), cancellationToken, "check");
+        var release = JsonSerializer.Deserialize<UpdateRelease>(output);
+        return release is not null && release.Validate() > UpdateRelease.CurrentVersion ? release : null;
+    }
+
+    public async Task<DownloadedUpdate> DownloadAsync(UpdateRelease release, CancellationToken cancellationToken = default)
+    {
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
         var stageId = Guid.NewGuid().ToString("N");
-        var output = await RunWorkerAsync(TimeSpan.FromMinutes(10), "download", JsonSerializer.Serialize(release), stageId);
+        var output = await RunWorkerAsync(TimeSpan.FromMinutes(10), request.Token, "download", JsonSerializer.Serialize(release), stageId);
         var download = JsonSerializer.Deserialize<DownloadedUpdate>(output) ?? throw new InvalidDataException("更新进程未返回下载信息。");
         if (download.Release != release || download.StageId != stageId) throw new InvalidDataException("更新下载结果不一致。");
         await Task.Run(() =>
         {
+            request.Token.ThrowIfCancellationRequested();
             // Keep a pending update intact until the user chooses to restart or exits.
             var lease = new FileStream(download.ExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
             lock (processGate)
             {
-                if (lifetime.IsCancellationRequested)
+                if (request.IsCancellationRequested)
                 {
                     lease.Dispose();
-                    lifetime.Token.ThrowIfCancellationRequested();
+                    request.Token.ThrowIfCancellationRequested();
                 }
                 downloadLease?.Dispose();
                 downloadLease = lease;
@@ -75,12 +83,13 @@ internal sealed class UpdateService : IDisposable
         return download;
     }
 
-    private Task<string> RunWorkerAsync(TimeSpan deadline, params string[] arguments) => Task.Run(async () =>
+    private Task<string> RunWorkerAsync(TimeSpan deadline, CancellationToken cancellationToken, params string[] arguments) => Task.Run(async () =>
     {
-        await workerGate.WaitAsync(lifetime.Token);
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
+        await workerGate.WaitAsync(request.Token);
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(request.Token);
             timeout.CancelAfter(deadline);
             using var process = new Process { StartInfo = WorkerStart(executable, arguments) };
             try
@@ -90,7 +99,7 @@ internal sealed class UpdateService : IDisposable
                 lock (processGate)
                 {
                     activeWorker = process;
-                    if (lifetime.IsCancellationRequested) StopProcess(process);
+                    if (request.IsCancellationRequested) StopProcess(process);
                 }
                 var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
                 var error = process.StandardError.ReadToEndAsync(timeout.Token);
@@ -100,7 +109,7 @@ internal sealed class UpdateService : IDisposable
                 if (process.ExitCode != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(message) ? "更新进程执行失败。" : message.Trim());
                 return result;
             }
-            catch (OperationCanceledException) when (!lifetime.IsCancellationRequested)
+            catch (OperationCanceledException) when (!request.IsCancellationRequested)
             { throw new TimeoutException("更新请求超时，请稍后再试。"); }
             finally
             {
@@ -159,14 +168,14 @@ internal sealed class UpdateInstaller(Process process, string temporaryPath) : I
         return Path.Combine(Path.GetDirectoryName(target)!, $".stwin-update-{download.StageId}.tmp");
     }
 
-    public static Task<UpdateInstaller> PrepareAsync(DownloadedUpdate download, CancellationToken cancellationToken) => Task.Run(async () =>
+    public static Task<UpdateInstaller> PrepareAsync(DownloadedUpdate download, CancellationToken cancellationToken, int clientProcessId = 0) => Task.Run(async () =>
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(2));
         var temporary = TemporaryPath(download, Environment.ProcessPath!);
         var process = new Process
         {
-            StartInfo = UpdateService.WorkerStart(download.ExecutablePath, "apply", JsonSerializer.Serialize(download),
+            StartInfo = UpdateService.WorkerStart(download.ExecutablePath, "apply", JsonSerializer.Serialize(download with { ClientProcessId = clientProcessId }),
                 Environment.ProcessId.ToString(), Environment.ProcessPath!)
         };
         try

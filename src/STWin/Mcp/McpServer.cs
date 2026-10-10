@@ -85,6 +85,7 @@ internal sealed class McpServer : IDisposable
             client.NoDelay = true;
             var stream = client.GetStream();
             string? response = null;
+            Action? afterReply = null;
             var status = "200 OK";
             var protocol = ProtocolVersion;
             try
@@ -107,7 +108,12 @@ internal sealed class McpServer : IDisposable
                     status = "415 Unsupported Media Type";
                     response = ErrorBody("Content-Type must be application/json.");
                 }
-                else response = await ProcessMessageAsync(request.Body, cancellationToken).ConfigureAwait(false);
+                else
+                {
+                    var message = await ProcessMessageAsync(request.Body, cancellationToken).ConfigureAwait(false);
+                    response = message.Body;
+                    afterReply = message.AfterReply;
+                }
             }
             catch (InvalidDataException ex)
             {
@@ -140,10 +146,13 @@ internal sealed class McpServer : IDisposable
                 await WriteResponseAsync(stream, status, response, protocol, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+            finally { afterReply?.Invoke(); }
         }
     }
 
-    private async Task<string?> ProcessMessageAsync(string body, CancellationToken cancellationToken)
+    private sealed record McpReply(string? Body, Action? AfterReply = null);
+
+    private async Task<McpReply> ProcessMessageAsync(string body, CancellationToken cancellationToken)
     {
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;
@@ -158,11 +167,11 @@ internal sealed class McpServer : IDisposable
         var idJson = hasId ? id.GetRawText() : "null";
         if (!hasId)
         {
-            if (method == "notifications/initialized" || method.StartsWith("notifications/", StringComparison.Ordinal)) return null;
-            return null;
+            return new(null);
         }
 
         object result;
+        Action? afterReply = null;
         switch (method)
         {
             case "initialize":
@@ -187,13 +196,14 @@ internal sealed class McpServer : IDisposable
             case "tools/call":
                 if (!root.TryGetProperty("params", out var callParams) || callParams.ValueKind != JsonValueKind.Object ||
                     !callParams.TryGetProperty("name", out var nameElement) || nameElement.ValueKind != JsonValueKind.String)
-                    return JsonRpcError(idJson, -32602, "tools/call requires params.name.");
+                    return new(JsonRpcError(idJson, -32602, "tools/call requires params.name."));
                 var name = nameElement.GetString()!;
                 var arguments = callParams.TryGetProperty("arguments", out var args) && args.ValueKind == JsonValueKind.Object
                     ? args.Clone() : EmptyObject();
                 try
                 {
                     var toolResult = await callTool(name, arguments).ConfigureAwait(false);
+                    afterReply = toolResult.AfterReply;
                     var text = toolResult.Data is { } data ? JsonSerializer.Serialize(data) : toolResult.Text;
                     var content = new List<object> { new { type = "text", text } };
                     if (toolResult.ImagePng is { Length: > 0 } image)
@@ -206,13 +216,20 @@ internal sealed class McpServer : IDisposable
                 }
                 break;
             default:
-                return JsonRpcError(idJson, -32601, $"Unknown MCP method: {method}");
+                return new(JsonRpcError(idJson, -32601, $"Unknown MCP method: {method}"));
         }
-        return $"{{\"jsonrpc\":\"2.0\",\"id\":{idJson},\"result\":{JsonSerializer.Serialize(result)}}}";
+        return new($"{{\"jsonrpc\":\"2.0\",\"id\":{idJson},\"result\":{JsonSerializer.Serialize(result)}}}", afterReply);
     }
 
     private static readonly object[] ToolDefinitions =
     {
+        new
+        {
+            name = "update_program",
+            description = "Check for a newer STWin release. Report no new version, or download and verify the update and restart STWin automatically. Apps in the clone are preserved; reconnect MCP after restart.",
+            inputSchema = new { type = "object", properties = new { }, additionalProperties = false },
+            annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = true }
+        },
         new
         {
             name = "get_desktop_status",

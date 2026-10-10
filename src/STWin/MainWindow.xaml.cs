@@ -465,7 +465,7 @@ public partial class MainWindow : Window
 
     private Task<DesktopCommandResult> HandleMcpToolAsync(string name, JsonElement arguments)
     {
-        if (name is not ("get_desktop_status" or "take_screenshot" or "mouse_move" or "mouse_click" or "mouse_scroll" or "key_press" or "type_text" or "run_script"))
+        if (name is not ("get_desktop_status" or "take_screenshot" or "mouse_move" or "mouse_click" or "mouse_scroll" or "key_press" or "type_text" or "run_script" or "update_program"))
             throw new ArgumentException($"未知的 STWin MCP 工具：{name}");
         return ExecuteCommandAsync(new(name, arguments), lifetime.Token);
     }
@@ -511,6 +511,7 @@ public partial class MainWindow : Window
         if (exiting || cliExitPending) throw new InvalidOperationException("STWin 正在退出。");
         var name = command.Name;
         var arguments = command.Arguments;
+        if (name == "update_program") return await UpdateProgramAsync(command.ClientProcessId, token);
         var readOnlyStatus = name is "get_desktop_status" or "get_settings";
         if (!readOnlyStatus)
         {
@@ -859,6 +860,71 @@ public partial class MainWindow : Window
         UpdateUi();
     }
     private void DismissUpdateClick(object sender, RoutedEventArgs e) => UpdateBanner.Visibility = Visibility.Collapsed;
+    private async Task<DesktopCommandResult> UpdateProgramAsync(int clientProcessId, CancellationToken cancellationToken)
+    {
+        if (updateBusy) throw new InvalidOperationException("另一个更新操作尚未完成，请稍后重试。");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(14));
+        var token = timeout.Token;
+        updateBusy = true;
+        UpdateUi();
+        var gateHeld = false;
+        var disconnecting = false;
+        var restarting = false;
+        try
+        {
+            // Checking and downloading do not take the desktop command lock.
+            var release = await updates.CheckAsync(token);
+            if (release is null) return new("无新版本");
+            availableUpdate = release;
+            ShowUpdate($"正在下载 {release.Version}，可继续使用桌面分身。");
+            if (downloadedUpdate is null || downloadedUpdate.Release != release)
+                downloadedUpdate = await updates.DownloadAsync(release, token);
+            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, token, clientProcessId);
+            token.ThrowIfCancellationRequested();
+            if (exiting || cliExitPending) throw new InvalidOperationException("STWin 正在退出。");
+            if (controller.Busy || operation != DesktopOperation.None || confirmationOpen || !commandGate.Wait(0))
+                throw new InvalidOperationException("正在处理桌面操作，请完成后再重启更新。");
+            gateHeld = true;
+            SetOperation(DesktopOperation.Disconnecting);
+            disconnecting = true;
+            if (!await controller.ExitAsync(ExitChoice.KeepSession, null, token))
+                throw new InvalidOperationException("桌面连接尚未断开，已取消更新。");
+            connectionState = 0;
+            SetFullscreenPresentation(false);
+            using var commitTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            commitTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+            await installer.CommitAsync(commitTimeout.Token);
+            cliExitPending = true;
+            restarting = true;
+            var message = $"正在升级到 {release.Version}，将自动重启；分身中的程序已保留。";
+            ShowUpdate(message);
+            // Keep CLI/MCP alive until its result has been sent. The installer also waits for the CLI to exit.
+            return new(message, AfterReply: RequestCliExit);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException("更新请求超时，请稍后再试。");
+        }
+        catch (Exception ex)
+        {
+            Settings.Log($"命令更新失败：{ex}");
+            if (!exiting) ShowUpdate($"更新未完成：{ex.Message}");
+            throw;
+        }
+        finally
+        {
+            if (gateHeld) commandGate.Release();
+            if (!restarting) updateBusy = false;
+            if (!exiting)
+            {
+                UpdateLater.IsEnabled = !restarting;
+                if (disconnecting) SetOperation(DesktopOperation.None);
+                else UpdateUi();
+            }
+        }
+    }
+
     private async void UpdateClick(object sender, RoutedEventArgs e)
     {
         if (exiting || updateBusy || availableUpdate is null) return;

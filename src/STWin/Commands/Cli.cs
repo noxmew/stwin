@@ -40,12 +40,13 @@ internal static class Cli
         text [--] "内容"                  输入文本；-- 后的内容按原文处理
         text --file FILE.txt              从本机 UTF-8 文件读取文本
         script FILE.ps1 [--output PNG]    向分身 PowerShell 提交脚本，可保存截图
+        update                            检查更新；无新版本时提示，有新版本时升级并重启
         version / --version              查看版本
         help / --help                    查看帮助
 
         --json 返回 JSON；成功退出码为 0，失败为 1，参数错误为 2，状态冲突为 3，
         超时为 4，权限不足为 5，取消为 130。script 返回成功表示脚本已提交。
-        start、connect、show、stop、settings 在需要时启动 STWin。
+        start、connect、show、stop、settings、update 在需要时启动 STWin。
         命令作用于当前用户和登录会话；管理员操作需从管理员终端启动 STWin。
         交互式 PowerShell 请用 STWin.exe status | Out-Host 等待命令结束；
         CMD 使用 start /wait "" STWin.exe status。脚本或 PowerShell 管道可读取输出和退出码。
@@ -68,7 +69,7 @@ internal static class Cli
                 return 0;
             }
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancelled.Token);
-            deadline.CancelAfter(TimeSpan.FromSeconds(90));
+            deadline.CancelAfter(invocation.Command!.Name == "update_program" ? TimeSpan.FromMinutes(16) : TimeSpan.FromSeconds(90));
             CommandReply reply;
             try { reply = await SendAsync(invocation.Command!, deadline.Token); }
             catch (OperationCanceledException) when (!cancelled.IsCancellationRequested)
@@ -114,7 +115,7 @@ internal static class Cli
             if (command.Name == "get_desktop_status")
                 return new(true, "STWin 未运行。", DesktopStatus.NotRunning());
             if (command.Name == "quit") return new(true, "STWin 未运行。");
-            if (command.Name is not ("start_desktop" or "connect_desktop" or "show" or "stop_desktop" or "get_settings" or "set_settings"))
+            if (command.Name is not ("start_desktop" or "connect_desktop" or "show" or "stop_desktop" or "get_settings" or "set_settings" or "update_program"))
                 throw new InvalidOperationException("STWin 未运行。请先执行 start 或 connect。");
             // Shell launch keeps the resident GUI from inheriting the CLI's output pipe.
             var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true };
@@ -146,6 +147,7 @@ internal static class Cli
         {
             case ["help" or "--help" or "-h"]: return new(null, json, Help: true);
             case ["version" or "--version" or "-v"]: return new(null, json, Version: true);
+            case ["update"]: return Call("update_program", new { });
             case ["status"]: return Call("get_desktop_status", new { });
             case ["start"]: return Call("start_desktop", new { });
             case ["connect"]: return Call("connect_desktop", new { });

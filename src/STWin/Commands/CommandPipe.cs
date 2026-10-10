@@ -2,10 +2,13 @@ using System;
 using System.Buffers.Binary;
 using System.IO;
 using System.IO.Pipes;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using STWin.Infrastructure;
+using Microsoft.Win32.SafeHandles;
 
 namespace STWin.Commands;
 
@@ -40,6 +43,10 @@ internal static class CommandPipe
 
 internal sealed class CommandServer(Func<DesktopCommand, CancellationToken, Task<DesktopCommandResult>> execute, Action quit) : IDisposable
 {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint processId);
+
     private readonly CancellationTokenSource lifetime = new();
     private readonly SemaphoreSlim connections = new(3, 3);
     private NamedPipeServerStream? listener;
@@ -83,6 +90,7 @@ internal sealed class CommandServer(Func<DesktopCommand, CancellationToken, Task
     private async Task HandleAsync(NamedPipeServerStream pipe)
     {
         var shouldQuit = false;
+        Action? afterReply = null;
         try
         {
             using (pipe)
@@ -93,6 +101,12 @@ internal sealed class CommandServer(Func<DesktopCommand, CancellationToken, Task
                 {
                     var command = await CommandPipe.ReadAsync<DesktopCommand>(pipe, CommandPipe.MaximumRequest, timeout.Token).ConfigureAwait(false);
                     if (command.Arguments.ValueKind != JsonValueKind.Object) throw new ArgumentException("命令参数必须是 JSON 对象。");
+                    if (command.Name == "update_program")
+                    {
+                        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var clientId)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                        command = command with { ClientProcessId = checked((int)clientId) };
+                        timeout.CancelAfter(TimeSpan.FromMinutes(15));
+                    }
                     CommandReply reply;
                     var disconnected = pipe.ReadAsync(new byte[1], timeout.Token).AsTask();
                     var action = execute(command, timeout.Token);
@@ -101,6 +115,7 @@ internal sealed class CommandServer(Func<DesktopCommand, CancellationToken, Task
                         if (await Task.WhenAny(action, disconnected).ConfigureAwait(false) == disconnected)
                             timeout.Cancel();
                         var result = await action.ConfigureAwait(false);
+                        afterReply = result.AfterReply;
                         reply = new(true, result.Text, result.Data, result.ImagePng);
                         shouldQuit = command.Name == "quit";
                     }
@@ -114,6 +129,7 @@ internal sealed class CommandServer(Func<DesktopCommand, CancellationToken, Task
         finally
         {
             connections.Release();
+            afterReply?.Invoke();
             if (shouldQuit) quit();
         }
     }

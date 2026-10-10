@@ -3,11 +3,13 @@ using System.ComponentModel;
 using System.Security.Principal;
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace STWin.Commands;
 
-internal sealed record DesktopCommand(string Name, JsonElement Arguments);
-internal sealed record DesktopCommandResult(string Text, byte[]? ImagePng = null, JsonElement? Data = null);
+internal sealed record DesktopCommand(string Name, JsonElement Arguments, [property: JsonIgnore] int ClientProcessId = 0);
+internal sealed record DesktopCommandResult(string Text, byte[]? ImagePng = null, JsonElement? Data = null,
+    [property: JsonIgnore] Action? AfterReply = null);
 internal sealed record CommandReply(bool Ok, string Message, JsonElement? Data = null, byte[]? ImagePng = null, string? Error = null, int ExitCode = 0)
 {
     public static CommandReply Failure(Exception exception)
