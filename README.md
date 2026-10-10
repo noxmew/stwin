@@ -1,47 +1,60 @@
 # STWin
 
-通用 Windows 桌面分身工具。基于微软公开的 Child Session API 与系统 RDP ActiveX 控件独立实现。
+在 Windows 上打开一个额外的桌面，可以在里面运行程序，也可以通过 MCP 查看画面、操作鼠标键盘和执行 PowerShell 脚本。
 
-## 开发
+## 下载
 
-需要 Windows x64 与 .NET 10 SDK。项目本地 SDK 路径为 `.tools/dotnet`，也可使用系统安装的 SDK。
+[下载 Windows x64 版](https://github.com/noxmew/stwin/releases/latest/download/STWin-win-x64.zip) · [所有版本](https://github.com/noxmew/stwin/releases)
 
-```powershell
-.\build.ps1
-.\build.ps1 -Publish
-```
+解压 `STWin-win-x64.zip`，打开文件夹中的 `STWin.exe`。整个文件夹都要保留，不需要安装 .NET。
 
-发布输出：`artifacts/STWin/STWin.exe`。自包含目录可整体复制，不需要另装运行时。
+需要 Windows x64。目前是开发预览版，桌面连接和多屏兼容性仍需验证。
 
 ## 使用
 
-- 启动程序后点击“启动桌面”。需要额外权限时显示管理员重启入口，由系统 UAC 确认。
-- 检测到仍在运行的分身时，主按钮显示“继续连接”，点击即可连接已有桌面。
-- 最小化后留在任务栏；再次启动程序会唤回已有窗口。
-- 连接桌面后点击右上角“全屏”，会切换到 Windows RDP 控件的原生全屏模式，原 STWin 窗口隐藏。顶部连接条仍是系统原生控件；跨屏移动全屏画面后，如果连接条没有跟随，STWin 会在目标显示器上重新进入原生全屏。还原窗口及 Ctrl+Alt+Break 快捷键由系统 RDP 控件处理；连接条最小化时仍可从任务栏恢复。跨屏重建会有短暂画面切换，真实多屏效果仍需在目标环境验证。
-- “结束桌面分身”会注销会话，先保存其中的工作。
-- 关闭窗口或从菜单退出时，有分身会话则提供左侧“保留分身并退出”和右侧“结束分身并退出”。按 Esc 可关闭提示、继续使用。没有分身时直接退出。
-- 保留退出只断开连接并退出 STWin，分身内的应用继续保留；再次打开后可继续连接。主 Windows 账号注销、电脑重启或关机仍会结束分身。
-- 音频与组合键设置在下次连接生效；每次启动连接时读取主显示器的像素分辨率，作为本次分身分辨率；连接后不再随窗口或显示器变化而修改。
-- 点击“继续连接”明确选择当前检测到的已有分身；连接或结束前会重新核对会话，发生变化时取消操作。系统同一时刻只能有一个活动且连接的子会话。
-- STWin 启动时会启动仅监听本机的 MCP 服务，提供分身状态、截图、鼠标键盘操作和 PowerShell 脚本工具；退出 STWin 时服务一起关闭。
+1. 打开 STWin，点击“启动桌面”。如果提示需要管理员权限，点击“以管理员身份重新打开”。
+2. 已有分身桌面时，点击“继续连接”。
+3. 右上角可以切换全屏；设置菜单中可以调整置顶、缩放、声音和组合键。
 
-### Agent / MCP 操作
+关闭程序时，选择“保留分身并退出”，里面的程序会继续运行，下次打开可以重新连接。选择“结束分身并退出”会关闭里面的程序，请先保存文件。Windows 账号注销、电脑重启或关机也会结束分身。
 
-MCP 连接信息自动写入 `%LocalAppData%/STWin/mcp-connection.json`。将其中的 `url` 配置到支持 Streamable HTTP 的 MCP 客户端。服务只绑定 `127.0.0.1`，不做鉴权。
+## MCP 连接
 
-可用工具：`get_desktop_status`、`take_screenshot`、`mouse_move`、`mouse_click`、`mouse_scroll`、`key_press`、`type_text` 和 `run_script`。鼠标坐标使用最近一张 MCP 截图的像素；截图文本会给出图像尺寸。截图从 RDP 画面窗口直接获取；鼠标事件发送给该窗口，按键走 RDP 控件接口，不需要 STWin 获得前台焦点。文本通过 RDP 剪贴板重定向粘贴，并在完成后尝试恢复本机原剪贴板。
+STWin 启动后会自动开启 MCP 服务，关闭 STWin 后服务停止。客户端需要支持 **Streamable HTTP**。
 
-`run_script` 会在分身内打开 PowerShell，提交脚本并返回桌面截图。脚本以分身中已登录用户的权限运行，可以访问该用户的数据及系统资源；每次最多 4000 个字符。它通过可见的桌面输入提交，不需要在分身内安装 Agent。
+通常使用这个地址：
 
-本版不会自动重试凭据，不保存密码，不修改外部远程访问或防火墙配置。实际点击启动时可能启用 Windows Child Sessions 能力。
+```text
+http://127.0.0.1:51374/mcp
+```
 
-## 验证
+如果端口被占用，程序会在 `51374–51385` 中选择可用端口。实际地址保存在：
 
-`build.ps1` 包含生命周期和界面状态测试，覆盖保留退出后新实例重连、结束退出、取消、会话变化与操作失败；这些测试使用模拟平台，不操作实际分身。程序参数 `--smoke-test` 仅创建并配置 RDP 控件、读取系统会话状态，在程序目录写入 `smoke-test.txt`；不调用启用、连接或注销 API。
+```text
+%LocalAppData%\STWin\mcp-connection.json
+```
 
-第一版为开发预览：生命周期测试与控件初始化验证不等于真实桌面连接验证。首次运行、账户登录、DPI、多屏、睡眠恢复和系统注销仍需要集成测试。
+按 `Win + R`，输入上面的文件路径即可查看。把文件里的 `url` 填到 MCP 客户端的服务器地址中；设置菜单里的“复制诊断信息”也包含这个地址。
 
-配置和日志保存在 `%LocalAppData%/STWin`。设计和官方 API 依据见 `docs/design.md`。
+| 工具 | 用途 |
+| --- | --- |
+| `get_desktop_status` | 查看连接状态和分辨率 |
+| `take_screenshot` | 获取分身截图 |
+| `mouse_move`、`mouse_click`、`mouse_scroll` | 移动、点击和滚动鼠标 |
+| `key_press` | 发送按键或组合键 |
+| `type_text` | 输入文字 |
+| `run_script` | 在分身中执行 PowerShell 脚本 |
 
+操作前先在 STWin 中连接桌面。鼠标坐标以最近一次截图为准；`run_script` 提交后返回截图，脚本的输出在分身里的 PowerShell 窗口中查看。
 
+MCP 只监听本机，目前没有鉴权。本机其他能访问该端口的程序也能调用这些工具。分身与主桌面共享文件和用户权限，不是沙箱；脚本可以修改该用户的文件和系统设置。
+
+## 源码构建
+
+需要 Windows x64 和 .NET 10 SDK。在仓库目录运行：
+
+```powershell
+dotnet publish .\src\STWin\STWin.csproj -c Release -r win-x64 --self-contained true -o .\artifacts\STWin
+```
+
+输出目录为 `artifacts/STWin`。GitHub Actions 会把整个目录打包为 `STWin-win-x64.zip`；推送与项目版本一致的 `v*` 标签时，会发布到 Releases。

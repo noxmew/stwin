@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -28,14 +29,64 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Build, test, and publish
+      - name: Publish Windows x64 app
         shell: pwsh
-        run: ./build.ps1 -Publish
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+          DOTNET_NOLOGO: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:IS_RELEASE -eq 'true') {
+            [xml]$project = Get-Content src/STWin/STWin.csproj
+            $expectedTag = "v$($project.Project.PropertyGroup.Version)"
+            if ($env:RELEASE_TAG -ne $expectedTag) {
+              throw "Release tag $env:RELEASE_TAG does not match project version $expectedTag."
+            }
+          }
+          dotnet publish src/STWin/STWin.csproj -c Release -r win-x64 --self-contained true -o artifacts/STWin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!(Test-Path -LiteralPath artifacts/STWin/STWin.exe)) {
+            throw 'Published STWin.exe is missing.'
+          }
+          Compress-Archive -Path artifacts/STWin/* -DestinationPath artifacts/STWin-win-x64.zip
 
       - name: Upload Windows x64 build
         uses: actions/upload-artifact@v4
         with:
           name: STWin-win-x64
-          path: artifacts/STWin/
+          path: artifacts/STWin-win-x64.zip
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows x64 ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: STWin-win-x64
+          path: dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/STWin-win-x64.zip \
+            --verify-tag \
+            --title "STWin $RELEASE_TAG" \
+            --notes 'Windows x64 开发预览版。下载 STWin-win-x64.zip，解压后运行 STWin.exe；请保留整个文件夹，无需安装 .NET。'
