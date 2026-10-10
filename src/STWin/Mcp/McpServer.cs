@@ -208,7 +208,9 @@ internal sealed class McpServer : IDisposable
                     var content = new List<object> { new { type = "text", text } };
                     if (toolResult.ImagePng is { Length: > 0 } image)
                         content.Add(new { type = "image", data = Convert.ToBase64String(image), mimeType = "image/png" });
-                    result = new { content, isError = false };
+                    result = toolResult.Data is { } structured
+                        ? new { content, structuredContent = structured, isError = false }
+                        : (object)new { content, isError = false };
                 }
                 catch (Exception ex)
                 {
@@ -223,6 +225,25 @@ internal sealed class McpServer : IDisposable
 
     private static readonly object[] ToolDefinitions =
     {
+        new
+        {
+            name = "launch_program",
+            description = "Launch an executable in the existing STWin-managed child session without keyboard or clipboard automation. Return the created process ID, executable path, session ID, arguments, working directory and start time. Use an absolute executable path or a program name on PATH. Arguments are passed as individual values without a shell; the program runs with the signed-in user's normal privileges. The RDP connection may be disconnected. Start or connect the clone first.",
+            inputSchema = new
+            {
+                type = "object",
+                properties = new
+                {
+                    fileName = new { type = "string", minLength = 1 },
+                    arguments = new { type = "array", items = new { type = "string" }, maxItems = 256 },
+                    workingDirectory = new { type = "string", minLength = 1 },
+                    sessionId = new { type = "integer", minimum = 1 }
+                },
+                required = new[] { "fileName" },
+                additionalProperties = false
+            },
+            annotations = new { readOnlyHint = false, destructiveHint = true, openWorldHint = true }
+        },
         new
         {
             name = "update_program",

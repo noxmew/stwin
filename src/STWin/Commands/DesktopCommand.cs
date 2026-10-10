@@ -10,6 +10,10 @@ namespace STWin.Commands;
 internal sealed record DesktopCommand(string Name, JsonElement Arguments, [property: JsonIgnore] int ClientProcessId = 0);
 internal sealed record DesktopCommandResult(string Text, byte[]? ImagePng = null, JsonElement? Data = null,
     [property: JsonIgnore] Action? AfterReply = null);
+internal sealed class CommandFailedException(string message, int exitCode) : Exception(message)
+{
+    public int ExitCode { get; } = exitCode;
+}
 internal sealed record CommandReply(bool Ok, string Message, JsonElement? Data = null, byte[]? ImagePng = null, string? Error = null, int ExitCode = 0)
 {
     public static CommandReply Failure(Exception exception)
@@ -17,6 +21,7 @@ internal sealed record CommandReply(bool Ok, string Message, JsonElement? Data =
         var error = exception.GetBaseException();
         var code = error switch
         {
+            CommandFailedException failed => failed.ExitCode,
             ArgumentException or FormatException => 2,
             TimeoutException => 4,
             UnauthorizedAccessException or Win32Exception { NativeErrorCode: 5 } => 5,

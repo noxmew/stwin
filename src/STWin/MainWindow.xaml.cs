@@ -465,7 +465,7 @@ public partial class MainWindow : Window
 
     private Task<DesktopCommandResult> HandleMcpToolAsync(string name, JsonElement arguments)
     {
-        if (name is not ("get_desktop_status" or "take_screenshot" or "mouse_move" or "mouse_click" or "mouse_scroll" or "key_press" or "type_text" or "run_script" or "update_program"))
+        if (name is not ("get_desktop_status" or "take_screenshot" or "mouse_move" or "mouse_click" or "mouse_scroll" or "key_press" or "type_text" or "run_script" or "update_program" or "launch_program"))
             throw new ArgumentException($"未知的 STWin MCP 工具：{name}");
         return ExecuteCommandAsync(new(name, arguments), lifetime.Token);
     }
@@ -525,6 +525,16 @@ public partial class MainWindow : Window
             {
                 case "get_desktop_status":
                     return new("桌面分身状态。", Data: DesktopStatusSnapshot());
+                case "launch_program":
+                {
+                    var launchSession = controller.RefreshSession() ?? throw new InvalidOperationException("没有正在运行的桌面分身，请先使用 start 创建。");
+                    if (launchSession != controller.ManagedId) throw new InvalidOperationException("请先使用 connect 连接现有分身，再启动程序。");
+                    if (arguments.TryGetProperty("sessionId", out var specifiedSession) && specifiedSession.GetUInt32() != launchSession)
+                        throw new InvalidOperationException("指定的分身会话不存在或已变化，已取消启动。");
+                    var launchRequest = ProgramLaunchRequest.Parse(launchSession, arguments);
+                    var launched = await ProgramLauncher.LaunchAsync(launchRequest, token);
+                    return new("程序已在分身中启动。", Data: JsonSerializer.SerializeToElement(launched, CommandPipe.JsonOptions));
+                }
                 case "start_desktop":
                 case "connect_desktop":
                     var current = controller.RefreshSession();

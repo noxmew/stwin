@@ -8,6 +8,7 @@ using STWin.Infrastructure;
 using STWin.Commands;
 using STWin.Updates;
 using STWin.Windows;
+using STWin.Sessions;
 
 namespace STWin;
 
@@ -20,6 +21,11 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (e.Args.Length > 0 && e.Args[0] == ProgramLauncher.WorkerArgument)
+        {
+            Shutdown(await ProgramLauncher.RunWorkerAsync(e.Args));
+            return;
+        }
         if (e.Args.Length > 0 && e.Args[0] == UpdateWorker.Argument)
         {
             Shutdown(await UpdateWorker.RunAsync(e.Args));
