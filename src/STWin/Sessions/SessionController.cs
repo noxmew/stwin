@@ -47,7 +47,7 @@ internal sealed class SessionController(ISessionPlatform platform, IDesktopConne
 
     private async Task StartCoreAsync(bool acceptExisting, uint? expectedId, CancellationToken cancellationToken)
     {
-        if (!await gate.WaitAsync(0, cancellationToken)) return;
+        if (!await gate.WaitAsync(0, cancellationToken)) throw new InvalidOperationException("正在处理桌面操作，请稍后再试。");
         Busy = true;
         try
         {
@@ -88,14 +88,14 @@ internal sealed class SessionController(ISessionPlatform platform, IDesktopConne
         finally { Busy = false; gate.Release(); }
     }
 
-    public Task StopAsync() => StopCoreAsync(ManagedId);
+    public Task StopAsync(CancellationToken cancellationToken = default) => StopCoreAsync(ManagedId, cancellationToken);
 
     // The caller must obtain explicit consent for this exact live session before invoking this overload.
-    public Task StopAsync(uint confirmedSessionId) => StopCoreAsync(confirmedSessionId);
+    public Task StopAsync(uint confirmedSessionId, CancellationToken cancellationToken = default) => StopCoreAsync(confirmedSessionId, cancellationToken);
 
-    private async Task StopCoreAsync(uint? expectedId)
+    private async Task StopCoreAsync(uint? expectedId, CancellationToken cancellationToken)
     {
-        if (!await gate.WaitAsync(0)) throw new InvalidOperationException("正在处理桌面操作，请稍后再试。");
+        if (!await gate.WaitAsync(0, cancellationToken)) throw new InvalidOperationException("正在处理桌面操作，请稍后再试。");
         Busy = true;
         try
         {
@@ -103,12 +103,13 @@ internal sealed class SessionController(ISessionPlatform platform, IDesktopConne
             if (current is null) { connection.Disconnect(); ManagedId = null; return; }
             if (current != expectedId) throw new InvalidOperationException("桌面会话已变化或未经确认，已取消结束操作。请重新选择。");
             platform.Logoff(current.Value);
-            using var timeout = new CancellationTokenSource(Timeout);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(Timeout);
             try
             {
                 while (ReadSession() == current) await Task.Delay(PollInterval, timeout.Token);
             }
-            catch (OperationCanceledException) { throw new TimeoutException("Windows 尚未确认注销完成。请稍后重试，或在任务管理器中检查会话。"); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TimeoutException("Windows 尚未确认注销完成。请稍后重试，或在任务管理器中检查会话。"); }
             connection.Disconnect();
             ManagedId = null;
         }
@@ -125,14 +126,14 @@ internal sealed class SessionController(ISessionPlatform platform, IDesktopConne
                 await DisconnectAsync(cancellationToken);
                 return true;
             case ExitChoice.EndSession when confirmedSessionId.HasValue:
-                await StopAsync(confirmedSessionId.Value);
+                await StopAsync(confirmedSessionId.Value, cancellationToken);
                 return true;
             default:
                 throw new InvalidOperationException("尚未确认要结束的桌面，请重新选择。");
         }
     }
 
-    private async Task DisconnectAsync(CancellationToken cancellationToken)
+    public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
         if (!await gate.WaitAsync(0, cancellationToken)) throw new InvalidOperationException("正在处理桌面操作，请稍后再试。");
         Busy = true;

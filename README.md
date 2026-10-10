@@ -10,6 +10,21 @@ Windows 桌面分身工具
 
 [下载](https://github.com/noxmew/stwin/releases)
 
+## CLI
+
+PowerShell：
+
+```powershell
+.\STWin.exe help | Out-Host
+.\STWin.exe start | Out-Host
+.\STWin.exe status --json | ConvertFrom-Json
+.\STWin.exe screenshot desktop.png | Out-Host
+.\STWin.exe stop --yes | Out-Host
+.\STWin.exe quit | Out-Host
+```
+
+支持连接、断开、窗口和设置控制，以及鼠标、键盘、文本和脚本操作；完整命令见 `help`。`disconnect` 和 `quit` 保留分身中的程序，`stop --yes` 结束分身。
+
 ## MCP
 
 ```json

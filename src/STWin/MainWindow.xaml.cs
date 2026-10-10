@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using STWin.Infrastructure;
+using STWin.Commands;
 using STWin.Mcp;
 using STWin.Sessions;
 using STWin.Updates;
@@ -42,8 +43,9 @@ public partial class MainWindow : Window
     private readonly bool previewMode;
     private bool confirmationOpen;
     private bool closeRequested;
+    private bool cliExitPending;
     private McpServer? mcpServer;
-    private readonly SemaphoreSlim mcpActionGate = new(1, 1);
+    private readonly SemaphoreSlim commandGate = new(1, 1);
     private readonly UpdateService updates = new();
     private UpdateRelease? availableUpdate;
     private DownloadedUpdate? downloadedUpdate;
@@ -200,7 +202,7 @@ public partial class MainWindow : Window
         FullscreenMonitorAnchor.Move(this, System.Windows.Forms.Screen.FromHandle(new System.Windows.Interop.WindowInteropHelper(this).Handle).Bounds);
     }
     private void Status(string text) => Settings.Log(text);
-    private DesktopUiState UiState => new(operation, connectionState, controller.AvailableId.HasValue, confirmationOpen);
+    private DesktopUiState UiState => new(operation, connectionState, controller.AvailableId.HasValue, confirmationOpen || cliExitPending || commandGate.CurrentCount == 0);
     private void SetOperation(DesktopOperation value)
     {
         operation = value;
@@ -461,89 +463,213 @@ public partial class MainWindow : Window
         }
     }
 
-    private Task<McpToolResult> HandleMcpToolAsync(string name, JsonElement arguments)
+    private Task<DesktopCommandResult> HandleMcpToolAsync(string name, JsonElement arguments)
     {
-        if (Dispatcher.CheckAccess()) return HandleMcpToolOnUiAsync(name, arguments);
-        return Dispatcher.InvokeAsync(() => HandleMcpToolOnUiAsync(name, arguments)).Task.Unwrap();
+        if (name is not ("get_desktop_status" or "take_screenshot" or "mouse_move" or "mouse_click" or "mouse_scroll" or "key_press" or "type_text" or "run_script"))
+            throw new ArgumentException($"未知的 STWin MCP 工具：{name}");
+        return ExecuteCommandAsync(new(name, arguments), lifetime.Token);
     }
 
-    private async Task<McpToolResult> HandleMcpToolOnUiAsync(string name, JsonElement arguments)
+    internal Task<DesktopCommandResult> ExecuteCommandAsync(DesktopCommand command, CancellationToken token)
     {
-        var readOnlyStatus = name == "get_desktop_status";
-        if (!readOnlyStatus && !mcpActionGate.Wait(0))
-            throw new InvalidOperationException("另一个 MCP 桌面操作尚未完成，请稍后重试。");
+        if (Dispatcher.CheckAccess()) return ExecuteCommandOnUiAsync(command, token);
+        return Dispatcher.InvokeAsync(() => ExecuteCommandOnUiAsync(command, token), DispatcherPriority.Normal, token).Task.Unwrap();
+    }
+
+    internal void RequestCliExit()
+    {
+        if (!Dispatcher.HasShutdownStarted) Dispatcher.BeginInvoke(new Action(CompleteExit));
+    }
+
+    private JsonElement DesktopStatusSnapshot()
+    {
+        var session = SessionApi.ChildId();
+        var state = host.ConnectionState;
+        var size = state == 1 ? host.DesktopSize : System.Drawing.Size.Empty;
+        return JsonSerializer.SerializeToElement(new
+        {
+            version = UpdateRelease.CurrentVersionText, running = true, processId = Environment.ProcessId,
+            childSessionsEnabled = SessionApi.IsEnabled(), sessionId = session,
+            managedSessionId = controller.ManagedId == session ? controller.ManagedId : null,
+            connected = state == 1, connectionState = state, busy = UiState.Busy || controller.Busy,
+            operation = operation.ToString().ToLowerInvariant(),
+            resolution = state == 1 ? new { width = size.Width, height = size.Height } : null,
+            fullscreen = state == 1 && host.IsFullscreen, mcpEndpoint = mcpServer?.Endpoint
+        });
+    }
+
+    private JsonElement SettingsSnapshot() => JsonSerializer.SerializeToElement(new
+    {
+        topmost = settings.Topmost, smartSizing = settings.SmartSizing, muted = settings.Muted, remoteKeys = settings.RemoteKeys
+    });
+
+    private async Task<DesktopCommandResult> ExecuteCommandOnUiAsync(DesktopCommand command, CancellationToken cancellationToken)
+    {
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
+        var token = request.Token;
+        token.ThrowIfCancellationRequested();
+        if (exiting || cliExitPending) throw new InvalidOperationException("STWin 正在退出。");
+        var name = command.Name;
+        var arguments = command.Arguments;
+        var readOnlyStatus = name is "get_desktop_status" or "get_settings";
+        if (!readOnlyStatus)
+        {
+            if (controller.Busy || operation != DesktopOperation.None || confirmationOpen || !commandGate.Wait(0))
+                throw new InvalidOperationException("另一个桌面操作尚未完成，请稍后重试。");
+        }
         try
         {
+            if (!readOnlyStatus) UpdateUi();
             switch (name)
             {
                 case "get_desktop_status":
-                {
-                    var state = host.ConnectionState;
-                    var size = state == 1 ? host.DesktopSize : System.Drawing.Size.Empty;
-                    return new McpToolResult(JsonSerializer.Serialize(new
+                    return new("桌面分身状态。", Data: DesktopStatusSnapshot());
+                case "start_desktop":
+                case "connect_desktop":
+                    var current = controller.RefreshSession();
+                    var expected = arguments.TryGetProperty("sessionId", out var sessionArg)
+                        ? sessionArg.GetUInt32() : (uint?)null;
+                    if (name == "connect_desktop" && !current.HasValue) throw new InvalidOperationException("没有可连接的桌面分身，请使用 start 创建。");
+                    if (expected.HasValue && current != expected) throw new InvalidOperationException("指定的桌面会话不存在或已变化。");
+                    if (name == "start_desktop" && current.HasValue && current != controller.ManagedId)
+                        throw new InvalidOperationException($"已有桌面会话 {current.Value}，请使用 connect --session {current.Value} 连接。");
+                    SetOperation(DesktopOperation.Connecting);
+                    try
                     {
-                        connected = state == 1,
-                        connectionState = state,
-                        resolution = state == 1 ? new { width = size.Width, height = size.Height } : null,
-                        fullscreen = state == 1 && host.IsFullscreen
-                    }));
-                }
+                        await Dispatcher.Yield(DispatcherPriority.Loaded);
+                        token.ThrowIfCancellationRequested();
+                        host.CreateControl();
+                        if (current.HasValue) await controller.StartAsync(current.Value, token);
+                        else await controller.StartAsync(false, token);
+                        connectionState = 1;
+                        ErrorBanner.Visibility = Visibility.Collapsed;
+                        requiresElevation = false;
+                        monitoringError = false;
+                        return new("已连接桌面分身。", Data: JsonSerializer.SerializeToElement(new { sessionId = controller.ManagedId, connected = true }));
+                    }
+                    finally { SetOperation(DesktopOperation.None); }
+                case "disconnect_desktop":
+                case "quit":
+                    SetOperation(DesktopOperation.Disconnecting);
+                    try
+                    {
+                        await controller.DisconnectAsync(token);
+                        connectionState = 0;
+                        SetFullscreenPresentation(false);
+                        if (name == "quit") cliExitPending = true;
+                        return new(name == "quit" ? "已断开连接，将退出 STWin；分身中的程序已保留。" : "已断开连接；分身中的程序已保留。");
+                    }
+                    finally { SetOperation(DesktopOperation.None); }
+                case "stop_desktop":
+                    if (!arguments.TryGetProperty("confirm", out var confirm) || confirm.ValueKind != JsonValueKind.True)
+                        throw new ArgumentException("结束桌面分身必须显式确认，请使用 stop --yes。");
+                    var child = controller.RefreshSession();
+                    if (arguments.TryGetProperty("sessionId", out var target) && child != target.GetUInt32())
+                        throw new InvalidOperationException("指定的桌面会话不存在或已变化，已取消结束操作。");
+                    if (!child.HasValue) return new("没有正在运行的桌面分身。");
+                    SetOperation(DesktopOperation.Ending);
+                    try
+                    {
+                        await controller.StopAsync(child.Value, token);
+                        connectionState = 0;
+                        SetFullscreenPresentation(false);
+                        return new("桌面分身已结束。");
+                    }
+                    finally { SetOperation(DesktopOperation.None); }
+                case "show":
+                    RestoreNativeFullscreen();
+                    Reveal();
+                    return new("主窗口已显示。");
+                case "hide":
+                    RestoreNativeFullscreen();
+                    Hide();
+                    return new("主窗口已隐藏。");
+                case "set_fullscreen":
+                    EnsureMcpDesktopAvailable();
+                    var fullscreen = arguments.GetProperty("enabled").GetBoolean();
+                    host.SetFullscreen(fullscreen);
+                    SetFullscreenPresentation(fullscreen);
+                    return new(fullscreen ? "已开启全屏。" : "已关闭全屏。");
+                case "get_settings":
+                    return new("当前设置。", Data: SettingsSnapshot());
+                case "set_settings":
+                    foreach (var setting in arguments.EnumerateObject())
+                        if (setting.Name is not ("topmost" or "smartSizing" or "muted" or "remoteKeys") ||
+                            setting.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                            throw new ArgumentException("设置参数必须是受支持的布尔值。");
+                    if (arguments.TryGetProperty("smartSizing", out var sizing))
+                    {
+                        if (host.IsHandleCreated) host.SetSizing(sizing.GetBoolean());
+                        SizingBox.IsChecked = settings.SmartSizing = sizing.GetBoolean();
+                    }
+                    if (arguments.TryGetProperty("topmost", out var pin))
+                        PinBox.IsChecked = Topmost = settings.Topmost = pin.GetBoolean();
+                    if (arguments.TryGetProperty("muted", out var mute)) MuteBox.IsChecked = settings.Muted = mute.GetBoolean();
+                    if (arguments.TryGetProperty("remoteKeys", out var keys)) KeysBox.IsChecked = settings.RemoteKeys = keys.GetBoolean();
+                    settings.Save();
+                    return new("设置已保存；静音和系统组合键在下次连接时生效。", Data: SettingsSnapshot());
                 case "take_screenshot":
-                    await PrepareAutomationTargetAsync();
+                    await PrepareAutomationTargetAsync(token);
                     var screenshot = CaptureDesktopPng();
-                    return new McpToolResult($"分身桌面截图，PNG 尺寸 {lastScreenshotSize.Width} × {lastScreenshotSize.Height} 像素。鼠标坐标使用此图像的像素坐标。", screenshot);
+                    return new DesktopCommandResult($"分身桌面截图，PNG 尺寸 {lastScreenshotSize.Width} × {lastScreenshotSize.Height} 像素。鼠标坐标使用此图像的像素坐标。", screenshot);
                 case "mouse_move":
-                    await PrepareAutomationTargetAsync();
+                    await PrepareAutomationTargetAsync(token);
                     var move = MapDesktopPoint(RequiredInt(arguments, "x"), RequiredInt(arguments, "y"));
                     DesktopInput.MoveMouse(host, move.Window, move.X, move.Y, move.ScreenX, move.ScreenY);
-                    return new McpToolResult("鼠标已移动到分身桌面指定坐标。");
+                    return new DesktopCommandResult("鼠标已移动到分身桌面指定坐标。");
                 case "mouse_click":
-                    await PrepareAutomationTargetAsync();
+                    await PrepareAutomationTargetAsync(token);
                     var click = MapDesktopPoint(RequiredInt(arguments, "x"), RequiredInt(arguments, "y"));
                     var button = OptionalString(arguments, "button", "left");
                     var count = OptionalInt(arguments, "count", 1);
                     if (count is < 1 or > 2) throw new ArgumentOutOfRangeException("count", "点击次数只能为 1 或 2。");
                     DesktopInput.ClickMouse(host, click.Window, click.X, click.Y, click.ScreenX, click.ScreenY, button, count);
-                    return new McpToolResult("已发送鼠标点击事件。");
+                    return new DesktopCommandResult("已发送鼠标点击事件。");
                 case "mouse_scroll":
-                    await PrepareAutomationTargetAsync();
+                    await PrepareAutomationTargetAsync(token);
                     var scroll = MapDesktopPoint(RequiredInt(arguments, "x"), RequiredInt(arguments, "y"));
                     var delta = RequiredInt(arguments, "delta");
                     if (delta is < -1200 or > 1200) throw new ArgumentOutOfRangeException("delta", "滚轮值需介于 -1200 至 1200。");
                     DesktopInput.Scroll(host, scroll.Window, scroll.X, scroll.Y, scroll.ScreenX, scroll.ScreenY, delta);
-                    return new McpToolResult("已发送鼠标滚轮事件。");
+                    return new DesktopCommandResult("已发送鼠标滚轮事件。");
                 case "key_press":
-                    await PrepareAutomationTargetAsync();
+                    await PrepareAutomationTargetAsync(token);
                     var key = DesktopInput.ParseKey(RequiredString(arguments, "key"));
                     var modifiers = ReadModifiers(arguments);
                     DesktopInput.PressKey(host, key, modifiers);
-                    return new McpToolResult("已发送键盘按键事件。");
+                    return new DesktopCommandResult("已发送键盘按键事件。");
                 case "type_text":
-                    await PrepareAutomationTargetAsync();
+                    await PrepareAutomationTargetAsync(token);
                     var text = RequiredString(arguments, "text");
                     if (text.Length > 10000) throw new ArgumentOutOfRangeException("text", "一次最多输入 10000 个字符。");
-                    await PasteTextToRemoteAsync(text);
-                    return new McpToolResult($"已通过 RDP 剪贴板向分身粘贴 {text.Length} 个字符。");
+                    await PasteTextToRemoteAsync(text, token);
+                    return new DesktopCommandResult($"已通过 RDP 剪贴板向分身粘贴 {text.Length} 个字符。");
                 case "run_script":
                     var script = RequiredString(arguments, "script");
                     if (script.Length is < 1 or > 4000) throw new ArgumentOutOfRangeException("script", "脚本长度需介于 1 至 4000 个字符。");
-                    return await RunPowerShellScriptAsync(script);
+                    return await RunPowerShellScriptAsync(script, token);
                 default:
-                    throw new ArgumentException($"未知的 STWin MCP 工具：{name}");
+                    throw new ArgumentException($"未知的桌面命令：{name}");
             }
         }
         finally
         {
-            if (!readOnlyStatus) mcpActionGate.Release();
+            if (!readOnlyStatus)
+            {
+                commandGate.Release();
+                if (!exiting) UpdateUi();
+            }
         }
     }
 
-    private async Task PrepareAutomationTargetAsync()
+    private async Task PrepareAutomationTargetAsync(CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
         EnsureMcpDesktopAvailable();
         connectionState = 1;
         UpdateUi();
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        token.ThrowIfCancellationRequested();
         EnsureMcpDesktopAvailable();
     }
 
@@ -551,7 +677,7 @@ public partial class MainWindow : Window
     {
         if (controller.Busy || operation != DesktopOperation.None || confirmationOpen)
             throw new InvalidOperationException("STWin 正在处理桌面操作或等待确认，请稍后重试。");
-        if (host.ConnectionState != 1) throw new InvalidOperationException("当前没有已连接的分身桌面。请先在 STWin 中启动或继续连接桌面。");
+        if (host.ConnectionState != 1) throw new InvalidOperationException("当前没有已连接的分身桌面。请先启动或连接桌面，也可使用 CLI 的 start 或 connect。");
     }
 
     private System.Drawing.Size lastScreenshotSize;
@@ -571,30 +697,31 @@ public partial class MainWindow : Window
         return (viewport.Handle, targetX, targetY, bounds.Left + targetX, bounds.Top + targetY);
     }
 
-    private async Task<McpToolResult> RunPowerShellScriptAsync(string script)
+    private async Task<DesktopCommandResult> RunPowerShellScriptAsync(string script, CancellationToken token)
     {
-        await PrepareAutomationTargetAsync();
+        await PrepareAutomationTargetAsync(token);
         DesktopInput.PressKey(host, System.Windows.Forms.Keys.Escape, new[] { System.Windows.Forms.Keys.ControlKey });
-        await Task.Delay(350);
-        await PasteTextToRemoteAsync("powershell");
-        await Task.Delay(700);
+        await Task.Delay(350, token);
+        await PasteTextToRemoteAsync("powershell", token);
+        await Task.Delay(700, token);
         DesktopInput.PressKey(host, System.Windows.Forms.Keys.Enter, Array.Empty<System.Windows.Forms.Keys>());
-        await Task.Delay(1800);
+        await Task.Delay(1800, token);
 
         // Base64 keeps the submitted PowerShell on one line and the clipboard paste preserves Unicode source text.
         var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(script));
         var command = $"Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')))";
         if (command.Length > 7000)
             throw new InvalidOperationException("脚本编码后超过 PowerShell 控制台单行输入限制，请缩短脚本或移除多余注释。");
-        await PasteTextToRemoteAsync(command);
+        await PasteTextToRemoteAsync(command, token);
         DesktopInput.PressKey(host, System.Windows.Forms.Keys.Enter, Array.Empty<System.Windows.Forms.Keys>());
-        await Task.Delay(1500);
+        await Task.Delay(1500, token);
         var screenshot = CaptureDesktopPng();
-        return new McpToolResult($"已在分身的 PowerShell 中提交脚本；请查看截图中的控制台输出。PowerShell 窗口会留在分身中。截图尺寸 {lastScreenshotSize.Width} × {lastScreenshotSize.Height} 像素。", screenshot);
+        return new DesktopCommandResult($"已在分身的 PowerShell 中提交脚本；请查看截图中的控制台输出。PowerShell 窗口会留在分身中。截图尺寸 {lastScreenshotSize.Width} × {lastScreenshotSize.Height} 像素。", screenshot);
     }
 
-    private async Task PasteTextToRemoteAsync(string text)
+    private async Task PasteTextToRemoteAsync(string text, CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
         System.Windows.IDataObject? previous = null;
         try { previous = Clipboard.GetDataObject(); }
         catch (System.Runtime.InteropServices.ExternalException ex) { throw new InvalidOperationException("无法读取本机剪贴板，未向分身粘贴文本。", ex); }
@@ -602,7 +729,7 @@ public partial class MainWindow : Window
         try
         {
             DesktopInput.PressKey(host, System.Windows.Forms.Keys.V, new[] { System.Windows.Forms.Keys.ControlKey });
-            await Task.Delay(700);
+            await Task.Delay(700, token);
         }
         finally
         {

@@ -2,10 +2,10 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Security.Principal;
 using System.Threading;
 using System.Windows;
 using STWin.Infrastructure;
+using STWin.Commands;
 using STWin.Updates;
 using STWin.Windows;
 
@@ -16,6 +16,7 @@ public partial class App : Application
     private Mutex? instance;
     private EventWaitHandle? activate;
     private RegisteredWaitHandle? activationWait;
+    private CommandServer? commands;
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -53,24 +54,29 @@ public partial class App : Application
             catch (Exception ex) { File.WriteAllText(output, ex.ToString()); Shutdown(1); }
             return;
         }
+        if (e.Args.Length > 0 && e.Args[0] is not ("--preview" or "--wait-for" or "--control-host" or "--update-cleanup"))
+        {
+            Shutdown(await Cli.RunAsync(e.Args));
+            return;
+        }
         if (e.Args.Length == 2 && e.Args[0] == "--wait-for" && int.TryParse(e.Args[1], out var oldPid))
         {
             try { using var old = Process.GetProcessById(oldPid); old.WaitForExit(10_000); }
             catch (ArgumentException) { }
         }
-        var sid = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
-        var name = $"Local\\STWin.{sid}.{Process.GetCurrentProcess().SessionId}";
+        var name = InstanceIdentity.MutexName;
         if (e.Args.Contains("--preview")) name += ".preview";
         instance = new Mutex(true, name, out var created);
         if (!created)
         {
-            try { using var signal = EventWaitHandle.OpenExisting(name + ".activate"); signal.Set(); }
+            try { if (!e.Args.Contains("--control-host")) { using var signal = EventWaitHandle.OpenExisting(name + ".activate"); signal.Set(); } }
             catch (WaitHandleCannotBeOpenedException) { }
             Shutdown();
             return;
         }
         activate = new EventWaitHandle(false, EventResetMode.AutoReset, name + ".activate");
         var window = new MainWindow(e.Args.Contains("--preview"));
+        if (e.Args.Contains("--control-host")) window.ShowActivated = false;
         MainWindow = window;
         activationWait = ThreadPool.RegisterWaitForSingleObject(activate, (_, _) => Dispatcher.BeginInvoke(window.Reveal), null, Timeout.Infinite, false);
         if (e.Args.Contains("--preview"))
@@ -96,11 +102,26 @@ public partial class App : Application
             };
         }
         window.Show();
+        if (!e.Args.Contains("--preview"))
+        {
+            try
+            {
+                commands = new CommandServer(window.ExecuteCommandAsync, window.RequestCliExit);
+                commands.Start();
+            }
+            catch (Exception ex)
+            {
+                Settings.Log($"启动 CLI 服务失败：{ex}");
+                MessageBox.Show(ex.Message, "STWin CLI 服务启动失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                window.RequestCliExit();
+            }
+        }
         if (e.Args is ["--update-cleanup", var stageId, var installerText] && int.TryParse(installerText, out var installerId))
             _ = System.Threading.Tasks.Task.Run(() => UpdateWorker.CleanupAsync(stageId, installerId));
     }
     protected override void OnExit(ExitEventArgs e)
     {
+        commands?.Dispose();
         activationWait?.Unregister(null);
         activate?.Dispose();
         instance?.Dispose();

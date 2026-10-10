@@ -9,11 +9,10 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using STWin.Infrastructure;
+using STWin.Commands;
 using STWin.Updates;
 
 namespace STWin.Mcp;
-
-internal sealed record McpToolResult(string Text, byte[]? ImagePng = null);
 
 internal sealed class McpServer : IDisposable
 {
@@ -21,12 +20,12 @@ internal sealed class McpServer : IDisposable
     private const int FirstPort = 51374;
     private const int PortCount = 12;
     private const int MaxRequestBytes = 1_000_000;
-    private readonly Func<string, JsonElement, Task<McpToolResult>> callTool;
+    private readonly Func<string, JsonElement, Task<DesktopCommandResult>> callTool;
     private readonly CancellationTokenSource lifetime = new();
     private TcpListener? listener;
     private int port;
 
-    public McpServer(Func<string, JsonElement, Task<McpToolResult>> callTool)
+    public McpServer(Func<string, JsonElement, Task<DesktopCommandResult>> callTool)
     {
         this.callTool = callTool;
     }
@@ -195,7 +194,8 @@ internal sealed class McpServer : IDisposable
                 try
                 {
                     var toolResult = await callTool(name, arguments).ConfigureAwait(false);
-                    var content = new List<object> { new { type = "text", text = toolResult.Text } };
+                    var text = toolResult.Data is { } data ? JsonSerializer.Serialize(data) : toolResult.Text;
+                    var content = new List<object> { new { type = "text", text } };
                     if (toolResult.ImagePng is { Length: > 0 } image)
                         content.Add(new { type = "image", data = Convert.ToBase64String(image), mimeType = "image/png" });
                     result = new { content, isError = false };
