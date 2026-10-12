@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using STWin.Commands;
 using STWin.Infrastructure;
 using STWin.Windows;
+using STWin.Admin;
 
 namespace STWin.Sessions;
 
@@ -73,7 +74,10 @@ internal static class ProgramLauncher
 {
     public const string WorkerArgument = "--launch-worker";
 
-    public static Task<LaunchedProgram> LaunchAsync(ProgramLaunchRequest request, CancellationToken cancellationToken) => Task.Run(async () =>
+    public static Task<LaunchedProgram> LaunchAsync(ProgramLaunchRequest request, CancellationToken token)
+        => AdminClient.LaunchAsync(request, token);
+
+    internal static Task<LaunchedProgram> LaunchInSessionAsync(ProgramLaunchRequest request, CancellationToken cancellationToken) => Task.Run(async () =>
     {
         request.Validate();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -87,7 +91,7 @@ internal static class ProgramLauncher
             using var identity = WindowsIdentity.GetCurrent();
             var sid = identity.User ?? throw new InvalidOperationException("无法确定当前 Windows 用户。");
             if (request.Elevated && !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
-                throw new UnauthorizedAccessException("以管理员权限启动分身内程序需要 STWin 主程序已以管理员身份运行，请以管理员身份重新启动 STWin 后重试。");
+                throw new UnauthorizedAccessException("分身启动助手没有获得管理员权限。");
             var security = new PipeSecurity();
             security.SetOwner(sid);
             security.SetAccessRuleProtection(true, false);
@@ -98,6 +102,7 @@ internal static class ProgramLauncher
             using var task = new SessionLaunchTask(pipeName, request.SessionId, sid.Value, request.Elevated);
             await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
             var workerId = SessionProcess.PipeClientProcessId(pipe);
+            using var worker = SessionProcess.OpenForInspection(workerId);
             if (SessionProcess.SessionId(workerId) != request.SessionId ||
                 !string.Equals(SessionProcess.ImagePath(workerId), Environment.ProcessPath, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("启动助手不在指定分身会话中，已取消启动。");
@@ -109,7 +114,10 @@ internal static class ProgramLauncher
             token.ThrowIfCancellationRequested();
             if (SessionApi.ChildId() != request.SessionId) throw new InvalidOperationException("分身会话已变化，已取消启动。");
             await CommandPipe.WriteAsync(pipe, "START", CommandPipe.MaximumRequest, token).ConfigureAwait(false);
-            return await ReadResultAsync(pipe, token).ConfigureAwait(false);
+            var result = await ReadResultAsync(pipe, token).ConfigureAwait(false);
+            if (await SessionProcess.WaitForExitAsync(worker, token).ConfigureAwait(false) != 0)
+                throw new InvalidOperationException("分身启动助手没有正常退出，请检查进程状态，勿重复提交。");
+            return result;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         { throw new TimeoutException("等待分身内程序启动超时；请检查分身，勿自动重复提交。"); }
@@ -175,7 +183,7 @@ internal sealed class SessionLaunchTask : IDisposable
     private readonly string name;
     private bool registered;
 
-    public SessionLaunchTask(string name, uint sessionId, string userSid, bool elevated)
+    public SessionLaunchTask(string name, uint sessionId, string userSid, bool elevated, string workerArgument = ProgramLauncher.WorkerArgument)
     {
         this.name = name;
         try
@@ -198,7 +206,7 @@ internal sealed class SessionLaunchTask : IDisposable
             dynamic actions = Keep(definition.Actions);
             dynamic action = Keep(actions.Create(0)); // TASK_ACTION_EXEC
             action.Path = Environment.ProcessPath!;
-            action.Arguments = $"{ProgramLauncher.WorkerArgument} {sessionId} {name} {Environment.ProcessId}";
+            action.Arguments = $"{workerArgument} {sessionId} {name} {Environment.ProcessId}";
             action.WorkingDirectory = Path.GetDirectoryName(Environment.ProcessPath!)!;
             dynamic task = Keep(folder.RegisterTaskDefinition(name, definition, 2, userSid, null, 3, null));
             registered = true;
@@ -209,7 +217,7 @@ internal sealed class SessionLaunchTask : IDisposable
         {
             Dispose();
             // Keep the permission error as the base exception so the CLI returns exit code 5.
-            throw new UnauthorizedAccessException("Windows 拒绝在分身中启动程序，请以管理员身份启动 STWin。");
+            throw new UnauthorizedAccessException("Windows 拒绝在分身中启动程序，请检查管理员后台及当前登录会话。");
         }
         catch { Dispose(); throw; }
     }

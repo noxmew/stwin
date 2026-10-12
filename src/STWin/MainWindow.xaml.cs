@@ -15,6 +15,7 @@ using STWin.Mcp;
 using STWin.Sessions;
 using STWin.Updates;
 using STWin.Windows;
+using STWin.Admin;
 using STWin.Views;
 using System.Windows.Media;
 
@@ -37,7 +38,10 @@ public partial class MainWindow : Window
     private System.Drawing.Rectangle? lastMonitorReanchor;
     private DesktopOperation operation;
     private int connectionState;
-    private bool requiresElevation;
+    private bool adminInstalled;
+    private bool adminBusy;
+    private Task? adminSynchronization;
+    internal bool ControlHidden { get; private set; }
     private bool monitoringError;
     private string lastError = "无";
     private readonly bool previewMode;
@@ -55,6 +59,12 @@ public partial class MainWindow : Window
     {
         previewMode = preview;
         InitializeComponent();
+        Exception? adminStateError = null;
+        if (!preview)
+        {
+            try { adminInstalled = AdminClient.Installed; }
+            catch (Exception ex) { adminStateError = ex; }
+        }
         host.FullscreenModeChanged += () => Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(SyncFullscreenFromHost));
         host.MinimizeRequested += () => Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(MinimizeNativeFullscreen));
         connectionBarTracker.MonitorMismatch += monitor =>
@@ -88,11 +98,12 @@ public partial class MainWindow : Window
         Loaded += (_, _) =>
         {
             RefreshConnection();
-            if (!previewMode) updates.Start();
+            if (!previewMode) { updates.Start(); adminSynchronization ??= SynchronizeAdminAsync(); }
         };
         timer.Tick += (_, _) => RefreshConnection();
         timer.Start();
         if (!previewMode) StartMcpService();
+        if (adminStateError is not null) Error(adminStateError);
     }
 
     private void StartMcpService()
@@ -113,6 +124,7 @@ public partial class MainWindow : Window
 
     public void Reveal()
     {
+        ControlHidden = false;
         if (hiddenForFullscreen)
         {
             SyncFullscreenFromHost();
@@ -219,9 +231,13 @@ public partial class MainWindow : Window
         FullscreenButton.Visibility = state.Connected ? Visibility.Visible : Visibility.Collapsed;
         FullscreenButton.IsEnabled = state.CanFullscreen;
         SizingBox.IsEnabled = MuteBox.IsEnabled = KeysBox.IsEnabled = !state.Busy;
-        ElevationButton.Visibility = requiresElevation && !state.HasSession && !state.Connected
-            ? Visibility.Visible : Visibility.Collapsed;
-        ElevationButton.IsEnabled = !state.Busy;
+        ElevationButton.Visibility = !adminInstalled && !previewMode ? Visibility.Visible : Visibility.Collapsed;
+        ElevationButton.IsEnabled = !adminBusy;
+        ElevationButton.Content = adminBusy ? "正在启用…" : "启用管理员支持";
+        AdminSetupButton.Visibility = adminInstalled ? Visibility.Collapsed : Visibility.Visible;
+        AdminSetupButton.IsEnabled = !adminBusy;
+        AdminStatusItem.Visibility = AdminRemoveButton.Visibility = adminInstalled ? Visibility.Visible : Visibility.Collapsed;
+        AdminRemoveButton.IsEnabled = !adminBusy;
         UpdateAction.IsEnabled = !updateBusy && (downloadedUpdate is null || !state.Busy && !controller.Busy);
         if (connectionState == 0 && (nativeFullscreen || hiddenForFullscreen)) SetFullscreenPresentation(false);
     }
@@ -354,6 +370,9 @@ public partial class MainWindow : Window
     private void DismissErrorClick(object sender, RoutedEventArgs e) => ErrorBanner.Visibility = Visibility.Collapsed;
     private void MoreClick(object sender, RoutedEventArgs e)
     {
+        try { adminInstalled = AdminClient.Installed; }
+        catch (Exception ex) { Error(ex); }
+        UpdateUi();
         MoreButton.ContextMenu.PlacementTarget = MoreButton;
         MoreButton.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
         MoreButton.ContextMenu.IsOpen = true;
@@ -370,7 +389,6 @@ public partial class MainWindow : Window
             : e is System.Runtime.InteropServices.COMException ? "桌面组件暂时不可用，请重试。详细原因可从菜单复制诊断信息。"
             : e.Message;
         ErrorBanner.Visibility = Visibility.Visible;
-        requiresElevation = e is Win32Exception { NativeErrorCode: 5 };
         monitoringError = fromMonitor;
         if (fromMonitor) connectionState = -1;
         else
@@ -397,11 +415,12 @@ public partial class MainWindow : Window
             if (accept && existing != offeredSessionId && !Confirm("连接已有桌面？", "检测到一个正在运行的桌面。连接后可由 STWin 管理和结束；若其他工具正在使用，请暂不连接。", "连接桌面", "暂不连接")) return;
             ErrorBanner.Visibility = Visibility.Collapsed;
             monitoringError = false;
-            requiresElevation = false;
             SetOperation(DesktopOperation.Connecting);
             await Dispatcher.Yield(DispatcherPriority.Loaded);
+            UpdateLayout();
             host.CreateControl();
             Status("正在连接桌面，请留意 Windows 登录提示…");
+            await AdminClient.EnableSessionsAsync(lifetime.Token);
             if (existing.HasValue) await controller.StartAsync(existing.Value, lifetime.Token);
             else await controller.StartAsync(false, lifetime.Token);
             connectionState = 1;
@@ -425,7 +444,6 @@ public partial class MainWindow : Window
             await controller.StopAsync(current.Value);
             connectionState = 0;
             ErrorBanner.Visibility = Visibility.Collapsed;
-            requiresElevation = false;
             Status("桌面已结束");
         }
         catch (Exception ex) { Error(ex); }
@@ -446,7 +464,6 @@ public partial class MainWindow : Window
             {
                 monitoringError = false;
                 ErrorBanner.Visibility = Visibility.Collapsed;
-                requiresElevation = false;
             }
             if (previous > 0 && current == 0)
             {
@@ -494,7 +511,7 @@ public partial class MainWindow : Window
             connected = state == 1, connectionState = state, busy = UiState.Busy || controller.Busy,
             operation = operation.ToString().ToLowerInvariant(),
             resolution = state == 1 ? new { width = size.Width, height = size.Height } : null,
-            fullscreen = state == 1 && host.IsFullscreen, mcpEndpoint = mcpServer?.Endpoint
+            fullscreen = state == 1 && host.IsFullscreen, mcpEndpoint = mcpServer?.Endpoint, administratorSupport = AdminClient.Installed
         });
     }
 
@@ -549,12 +566,13 @@ public partial class MainWindow : Window
                     {
                         await Dispatcher.Yield(DispatcherPriority.Loaded);
                         token.ThrowIfCancellationRequested();
+                        UpdateLayout();
                         host.CreateControl();
+                        await AdminClient.EnableSessionsAsync(token);
                         if (current.HasValue) await controller.StartAsync(current.Value, token);
                         else await controller.StartAsync(false, token);
                         connectionState = 1;
                         ErrorBanner.Visibility = Visibility.Collapsed;
-                        requiresElevation = false;
                         monitoringError = false;
                         return new("已连接桌面分身。", Data: JsonSerializer.SerializeToElement(new { sessionId = controller.ManagedId, connected = true }));
                     }
@@ -593,7 +611,7 @@ public partial class MainWindow : Window
                     return new("主窗口已显示。");
                 case "hide":
                     RestoreNativeFullscreen();
-                    Hide();
+                    HideForControl();
                     return new("主窗口已隐藏。");
                 case "set_fullscreen":
                     EnsureMcpDesktopAvailable();
@@ -850,16 +868,54 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { Error(ex); }
     }
-    private void ElevateClick(object sender, RoutedEventArgs e)
+    internal void ShowStartupError(Exception error) => Error(error);
+
+    internal void HideForControl()
     {
+        ControlHidden = true;
+        Hide();
+    }
+
+    private async Task SynchronizeAdminAsync()
+    {
+        try { await AdminClient.SynchronizeAsync(lifetime.Token); }
+        catch (Exception ex) { if (!exiting) Error(ex); }
+    }
+
+    private async void AdminEnableClick(object sender, RoutedEventArgs e)
+    {
+        if (adminBusy) return;
+        adminBusy = true;
+        settings.AdminSetupAttempted = true;
+        Save();
+        UpdateUi();
         try
         {
-            if (controller.Busy || UiState.Busy || controller.ManagedId.HasValue) throw new InvalidOperationException("请先结束受管分身，再重新打开程序。");
-            Process.Start(new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true, Verb = "runas", Arguments = $"--wait-for {Environment.ProcessId}" });
-            CompleteExit();
+            await AdminClient.InitializeAsync(true, lifetime.Token);
+            adminInstalled = AdminClient.Installed;
+            ErrorBanner.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex) { Error(ex); }
+        finally { adminBusy = false; UpdateUi(); }
     }
+
+    private async void AdminRemoveClick(object sender, RoutedEventArgs e)
+    {
+        if (adminBusy) return;
+        adminBusy = true;
+        settings.AdminSetupAttempted = true;
+        Save();
+        UpdateUi();
+        try
+        {
+            await AdminClient.RemoveAsync(lifetime.Token);
+            adminInstalled = false;
+            ErrorBanner.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception ex) { Error(ex); }
+        finally { adminBusy = false; UpdateUi(); }
+    }
+
     private void ExitClick(object sender, RoutedEventArgs e) => Close();
     private void ShowUpdate(string message)
     {
@@ -890,7 +946,7 @@ public partial class MainWindow : Window
             ShowUpdate($"正在下载 {release.Version}，可继续使用桌面分身。");
             if (downloadedUpdate is null || downloadedUpdate.Release != release)
                 downloadedUpdate = await updates.DownloadAsync(release, token);
-            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, token, clientProcessId);
+            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, token, clientProcessId, hiddenHost: ControlHidden);
             token.ThrowIfCancellationRequested();
             if (exiting || cliExitPending) throw new InvalidOperationException("STWin 正在退出。");
             if (controller.Busy || operation != DesktopOperation.None || confirmationOpen || !commandGate.Wait(0))
@@ -951,7 +1007,7 @@ public partial class MainWindow : Window
                 return;
             }
             ShowUpdate("正在准备更新…");
-            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, lifetime.Token);
+            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, lifetime.Token, hiddenHost: ControlHidden);
             lifetime.Token.ThrowIfCancellationRequested();
             if (controller.Busy || UiState.Busy) throw new InvalidOperationException("正在处理桌面操作，请完成后再重启更新。");
             SetOperation(DesktopOperation.Disconnecting);

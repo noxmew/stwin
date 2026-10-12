@@ -4,6 +4,9 @@ using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Security.Principal;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 using STWin.Infrastructure;
 using STWin.Sessions;
@@ -83,11 +86,63 @@ internal sealed class SessionProcess : IDisposable
         return ImagePath(process);
     }
 
-    private static bool IsElevated(uint processId)
+    public static bool IsElevated(uint processId)
     {
         using var process = OpenProcess(0x1000, false, processId); // PROCESS_QUERY_LIMITED_INFORMATION
         if (process.IsInvalid) throw Error("读取启动助手进程失败");
         return IsElevated(process);
+    }
+
+    public static string UserSid(uint processId)
+    {
+        using var process = OpenProcess(0x1000, false, processId);
+        if (process.IsInvalid) throw Error("读取进程用户失败");
+        if (!OpenProcessToken(process, 8, out var token)) throw Error("读取进程令牌失败");
+        using (token)
+        using (var identity = new WindowsIdentity(token.DangerousGetHandle()))
+            return identity.User?.Value ?? throw new InvalidOperationException("进程没有用户 SID。");
+    }
+
+    internal static SafeProcessHandle OpenForInspection(uint processId)
+    {
+        var process = OpenProcess(0x101000, false, processId);
+        if (!process.IsInvalid) return process;
+        var error = Error("读取后台进程失败");
+        process.Dispose();
+        throw error;
+    }
+
+    internal static async Task<int> WaitForExitAsync(SafeProcessHandle process, CancellationToken token)
+    {
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            var state = WaitForSingleObject(process, 0);
+            if (state == 0) break;
+            if (state != 258) throw Error("等待后台更新失败");
+            await Task.Delay(100, token).ConfigureAwait(false);
+        }
+        if (!GetExitCodeProcess(process, out var code)) throw Error("读取后台更新结果失败");
+        return checked((int)code);
+    }
+
+    internal static void AllowInspection(string userSid, int processId = 0)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        if (!identity.IsSystem) throw new UnauthorizedAccessException("只有系统后台可以设置进程查询权限。");
+        using var current = processId == 0 ? System.Diagnostics.Process.GetCurrentProcess() : System.Diagnostics.Process.GetProcessById(processId);
+        SetInspectionAcl(current.Handle, userSid, "0x00101000"); // QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+        if (!OpenProcessToken(current.SafeHandle, 0x40008, out var token)) throw Error("打开后台令牌失败");
+        using (token) SetInspectionAcl(token.DangerousGetHandle(), userSid, "0x00000008"); // TOKEN_QUERY only
+    }
+
+    private static void SetInspectionAcl(IntPtr handle, string sid, string rights)
+    {
+        var descriptorText = $"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;{rights};;;{new SecurityIdentifier(sid).Value})";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptorText, 1, out var descriptor, out _))
+            throw Error("创建后台查询权限失败");
+        try { if (!SetKernelObjectSecurity(handle, 4, descriptor)) throw Error("设置后台查询权限失败"); }
+        finally { LocalFree(descriptor); }
     }
 
     private static bool IsElevated(SafeProcessHandle process)
@@ -185,6 +240,16 @@ internal sealed class SessionProcess : IDisposable
     private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint timeout);
+    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(SafeProcessHandle handle, out uint code);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string descriptor, uint revision, out IntPtr security, out uint length);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(IntPtr handle, uint information, IntPtr descriptor);
+    [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool OpenProcessToken(SafeProcessHandle process, uint desiredAccess, out SafeAccessTokenHandle token);

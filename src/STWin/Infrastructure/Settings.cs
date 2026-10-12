@@ -14,6 +14,7 @@ public sealed class Settings
     public bool SmartSizing { get; set; } = true;
     public bool Muted { get; set; }
     public bool RemoteKeys { get; set; }
+    public bool AdminSetupAttempted { get; set; }
     public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "STWin");
 
     public static Settings Load()

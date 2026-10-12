@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using STWin.Updates;
 using STWin.Windows;
+using STWin.Admin;
 
 namespace STWin.Commands;
 
@@ -42,7 +43,8 @@ internal static class Cli
         script FILE.ps1 [--output PNG]    向分身 PowerShell 提交脚本，可保存截图
         launch PROGRAM [选项] [-- ARG...] 在分身内启动程序，返回进程 ID、路径和会话 ID
           --cwd DIR / --session ID       指定工作目录 / 核对分身会话 ID；程序参数放在 -- 后
-          --elevated                     以管理员权限启动；STWin 主程序需已以管理员身份运行
+          --elevated                     通过已授权后台以管理员权限启动
+        admin status / enable / remove   查询、启用或移除管理员支持
         update                            检查更新；无新版本时提示，有新版本时升级并重启
         version / --version              查看版本
         help / --help                    查看帮助
@@ -50,7 +52,7 @@ internal static class Cli
         --json 返回 JSON；成功退出码为 0，失败为 1，参数错误为 2，状态冲突为 3，
         超时为 4，权限不足为 5，取消为 130。script 返回成功表示脚本已提交。
         start、connect、show、stop、settings、update 在需要时启动 STWin。
-        命令作用于当前用户和登录会话；管理员操作需从管理员终端启动 STWin。
+        命令作用于当前用户和登录会话；首次授权后无需管理员终端。
         交互式 PowerShell 请用 STWin.exe status | Out-Host 等待命令结束；
         CMD 使用 start /wait "" STWin.exe status。脚本或 PowerShell 管道可读取输出和退出码。
         """;
@@ -72,10 +74,33 @@ internal static class Cli
                 return 0;
             }
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancelled.Token);
-            deadline.CancelAfter(invocation.Command!.Name == "update_program" ? TimeSpan.FromMinutes(16) : TimeSpan.FromSeconds(90));
+            deadline.CancelAfter(invocation.Command!.Name is "update_program" or "admin_enable" ? TimeSpan.FromMinutes(16) : TimeSpan.FromMinutes(12));
             CommandReply reply;
-            try { reply = await SendAsync(invocation.Command!, deadline.Token); }
-            catch (OperationCanceledException) when (!cancelled.IsCancellationRequested)
+            try
+            {
+                switch (invocation.Command.Name)
+                {
+                    case "admin_status":
+                        var installed = AdminClient.Installed;
+                        reply = new(true, installed ? "管理员支持已启用。" : "管理员支持未启用。",
+                            JsonSerializer.SerializeToElement(new { installed, running = installed && ServiceRegistration.IsRunning(AdminClient.UserSid), autoStart = false }));
+                        break;
+                    case "admin_enable":
+                        await AdminClient.InitializeAsync(true, deadline.Token);
+                        reply = new(true, "管理员支持已启用。");
+                        break;
+                    case "admin_remove":
+                        await AdminClient.RemoveAsync(deadline.Token);
+                        reply = new(true, "管理员支持已移除。");
+                        break;
+                    default:
+                        if (invocation.Command.Name is not ("get_desktop_status" or "quit"))
+                            await AdminClient.InitializeAsync(false, deadline.Token);
+                        reply = await SendAsync(invocation.Command, deadline.Token);
+                        break;
+                }
+            }
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancelled.IsCancellationRequested)
             { throw new TimeoutException("命令超时。请用 status 查询当前状态，不要自动重复提交操作。"); }
             if (reply.Ok && invocation.OutputPath is not null)
             {
@@ -151,6 +176,9 @@ internal static class Cli
             case ["help" or "--help" or "-h"]: return new(null, json, Help: true);
             case ["version" or "--version" or "-v"]: return new(null, json, Version: true);
             case ["update"]: return Call("update_program", new { });
+            case ["admin", "status"]: return Call("admin_status", new { });
+            case ["admin", "enable"]: return Call("admin_enable", new { });
+            case ["admin", "remove"]: return Call("admin_remove", new { });
             case ["launch", var program, .. var options]:
                 string? directory = null;
                 uint? launchSession = null;

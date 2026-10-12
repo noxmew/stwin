@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using STWin.Infrastructure;
 using STWin.Commands;
 using STWin.Updates;
+using STWin.Windows;
 
 namespace STWin.Mcp;
 
@@ -91,6 +92,7 @@ internal sealed class McpServer : IDisposable
             try
             {
                 var request = await ReadRequestAsync(stream, cancellationToken).ConfigureAwait(false);
+                LocalClientIdentity.Verify(client);
                 protocol = request.Headers.TryGetValue("mcp-protocol-version", out var requestedVersion) && IsSupportedVersion(requestedVersion)
                     ? requestedVersion : ProtocolVersion;
                 if (!string.Equals(request.Method, "POST", StringComparison.OrdinalIgnoreCase))
@@ -114,6 +116,11 @@ internal sealed class McpServer : IDisposable
                     response = message.Body;
                     afterReply = message.AfterReply;
                 }
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                status = "403 Forbidden";
+                response = ErrorBody(ex.Message);
             }
             catch (InvalidDataException ex)
             {
@@ -228,7 +235,7 @@ internal sealed class McpServer : IDisposable
         new
         {
             name = "launch_program",
-            description = "Launch an executable in the existing STWin-managed child session without keyboard or clipboard automation. Return the created process ID, executable path, session ID, arguments, working directory, start time and actual elevation status. Use an absolute executable path or a program name on PATH. Arguments are passed as individual values without a shell; the program runs with the signed-in user's normal privileges by default. Set elevated to true to run as administrator; the resident STWin process must already be running as administrator. The RDP connection may be disconnected. Start or connect the clone first.",
+            description = "Launch an executable in the existing STWin-managed child session. Return process ID, path, session ID, arguments, working directory, start time and actual elevation. Use an absolute path or a name on PATH; arguments are passed without a shell. The program uses the signed-in user's normal privileges by default. Set elevated to true for administrator privileges through the installed STWin backend. Complete initial authorization in STWin or with admin enable first; MCP never opens a UAC prompt. The RDP connection may be disconnected. Start or connect the clone first.",
             inputSchema = new
             {
                 type = "object",

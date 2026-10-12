@@ -9,6 +9,7 @@ using STWin.Commands;
 using STWin.Updates;
 using STWin.Windows;
 using STWin.Sessions;
+using STWin.Admin;
 
 namespace STWin;
 
@@ -21,16 +22,6 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        if (e.Args.Length > 0 && e.Args[0] == ProgramLauncher.WorkerArgument)
-        {
-            Shutdown(await ProgramLauncher.RunWorkerAsync(e.Args));
-            return;
-        }
-        if (e.Args.Length > 0 && e.Args[0] == UpdateWorker.Argument)
-        {
-            Shutdown(await UpdateWorker.RunAsync(e.Args));
-            return;
-        }
         if (e.Args.Contains("--smoke-test"))
         {
             var output = Path.Combine(AppContext.BaseDirectory, "smoke-test.txt");
@@ -60,15 +51,10 @@ public partial class App : Application
             catch (Exception ex) { File.WriteAllText(output, ex.ToString()); Shutdown(1); }
             return;
         }
-        if (e.Args.Length > 0 && e.Args[0] is not ("--preview" or "--wait-for" or "--control-host" or "--update-cleanup"))
+        if (e.Args.Length > 0 && e.Args[0] is not ("--preview" or "--control-host" or "--update-cleanup"))
         {
             Shutdown(await Cli.RunAsync(e.Args));
             return;
-        }
-        if (e.Args.Length == 2 && e.Args[0] == "--wait-for" && int.TryParse(e.Args[1], out var oldPid))
-        {
-            try { using var old = Process.GetProcessById(oldPid); old.WaitForExit(10_000); }
-            catch (ArgumentException) { }
         }
         var name = InstanceIdentity.MutexName;
         if (e.Args.Contains("--preview")) name += ".preview";
@@ -81,8 +67,20 @@ public partial class App : Application
             return;
         }
         activate = new EventWaitHandle(false, EventResetMode.AutoReset, name + ".activate");
+        Exception? setupError = null;
+        if (!e.Args.Contains("--preview") && !e.Args.Contains("--control-host"))
+        {
+            try { await AdminClient.InitializeAsync(false, CancellationToken.None, synchronize: false); }
+            catch (Exception ex) { setupError = ex; }
+        }
         var window = new MainWindow(e.Args.Contains("--preview"));
-        if (e.Args.Contains("--control-host")) window.ShowActivated = false;
+        if (e.Args.Contains("--control-host"))
+        {
+            window.ShowActivated = false;
+            window.ShowInTaskbar = false;
+            window.Opacity = 0;
+            window.Loaded += (_, _) => { window.HideForControl(); window.Opacity = 1; window.ShowInTaskbar = true; };
+        }
         MainWindow = window;
         activationWait = ThreadPool.RegisterWaitForSingleObject(activate, (_, _) => Dispatcher.BeginInvoke(window.Reveal), null, Timeout.Infinite, false);
         if (e.Args.Contains("--preview"))
@@ -108,6 +106,7 @@ public partial class App : Application
             };
         }
         window.Show();
+        if (setupError is not null) window.ShowStartupError(setupError);
         if (!e.Args.Contains("--preview"))
         {
             try
@@ -122,8 +121,8 @@ public partial class App : Application
                 window.RequestCliExit();
             }
         }
-        if (e.Args is ["--update-cleanup", var stageId, var installerText] && int.TryParse(installerText, out var installerId))
-            _ = System.Threading.Tasks.Task.Run(() => UpdateWorker.CleanupAsync(stageId, installerId));
+        if (e.Args.Length >= 3 && e.Args[0] == "--update-cleanup" && int.TryParse(e.Args[2], out var installerId))
+            _ = System.Threading.Tasks.Task.Run(() => UpdateWorker.CleanupAsync(e.Args[1], installerId));
     }
     protected override void OnExit(ExitEventArgs e)
     {

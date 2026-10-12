@@ -1,9 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Net.Http;
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,36 +46,11 @@ internal static class UpdateWorker
         }
     }
 
-    private static HttpClient CreateClient()
-    {
-        var client = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(8) })
-        {
-            Timeout = System.Threading.Timeout.InfiniteTimeSpan
-        };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd($"STWin/{UpdateRelease.CurrentVersionText}");
-        return client;
-    }
-
     private static async Task<UpdateRelease?> CheckAsync()
     {
         CleanupOldDownloads();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        using var client = CreateClient();
-        client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
-        using var response = await client.GetAsync("https://api.github.com/repos/noxmew/stwin/releases/latest", timeout.Token);
-        response.EnsureSuccessStatusCode();
-        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
-        var root = json.RootElement;
-        if (root.GetProperty("draft").GetBoolean() || root.GetProperty("prerelease").GetBoolean()) return null;
-        var tag = root.GetProperty("tag_name").GetString()!;
-        if (!tag.StartsWith('v')) throw new InvalidDataException("Release 版本标签无效。");
-        var asset = root.GetProperty("assets").EnumerateArray()
-            .Single(item => item.GetProperty("name").GetString() == "STWin.exe");
-        var digest = asset.GetProperty("digest").GetString();
-        if (digest is null || !digest.StartsWith("sha256:", StringComparison.Ordinal))
-            throw new InvalidDataException("Release 缺少 SHA256 校验值。");
-        var release = new UpdateRelease(tag[1..], asset.GetProperty("browser_download_url").GetString()!,
-            asset.GetProperty("size").GetInt64(), digest[7..]);
+        var release = await UpdateSource.ReadAsync(null, timeout.Token);
         return release.Validate() > UpdateRelease.CurrentVersion ? release : null;
     }
 
@@ -91,46 +63,11 @@ internal static class UpdateWorker
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
-            using var client = CreateClient();
-            using var response = await client.GetAsync(release.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-            response.EnsureSuccessStatusCode();
-            if (response.Content.Headers.ContentLength is long length && length != release.Size)
-                throw new InvalidDataException("更新文件大小与 Release 不一致。");
-            await using (var source = await response.Content.ReadAsStreamAsync(timeout.Token))
-            await using (var destination = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true))
-            {
-                var buffer = new byte[81920];
-                long total = 0;
-                int count;
-                while ((count = await source.ReadAsync(buffer, timeout.Token)) != 0)
-                {
-                    total += count;
-                    if (total > release.Size) throw new InvalidDataException("更新文件超出声明的大小。");
-                    await destination.WriteAsync(buffer.AsMemory(0, count), timeout.Token);
-                }
-            }
-            await VerifyAsync(partial, release, timeout.Token);
+            await UpdateSource.DownloadAsync(release, partial, timeout.Token);
             File.Move(partial, download.ExecutablePath);
             return download;
         }
-        catch
-        {
-            DeleteStage(stageId);
-            throw;
-        }
-    }
-
-    private static async Task VerifyAsync(string path, UpdateRelease release, CancellationToken token)
-    {
-        var version = release.Validate();
-        if (new FileInfo(path).Length != release.Size) throw new InvalidDataException("更新文件大小不一致。");
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true);
-        var hash = await SHA256.HashDataAsync(stream, token);
-        if (!CryptographicOperations.FixedTimeEquals(hash, Convert.FromHexString(release.Sha256)))
-            throw new InvalidDataException("更新文件 SHA256 校验失败。");
-        var fileVersion = FileVersionInfo.GetVersionInfo(path).FileVersion;
-        if (!Version.TryParse(fileVersion, out var actualVersion) || UpdateRelease.Normalize(actualVersion) != version)
-            throw new InvalidDataException("更新程序版本与 Release 不一致。");
+        catch { DeleteStage(stageId); throw; }
     }
 
     private static async Task ApplyAsync(DownloadedUpdate download, int parentId, string targetPath)
@@ -152,12 +89,13 @@ internal static class UpdateWorker
         try
         {
             // Prepare and verify a sibling file before asking the running app to exit.
-            using (var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2)))
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10)))
             {
                 await using (var source = new FileStream(download.ExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true))
                 await using (var destination = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true))
                     await source.CopyToAsync(destination, timeout.Token);
-                await VerifyAsync(temporary, download.Release, timeout.Token);
+                await UpdateSource.VerifyAsync(temporary, download.Release, timeout.Token);
+                await STWin.Admin.AdminClient.UpdateAsync(download.Release.Version, timeout.Token);
             }
             await Console.Out.WriteLineAsync("READY");
             await Console.Out.FlushAsync();
@@ -186,6 +124,7 @@ internal static class UpdateWorker
                 start.ArgumentList.Add("--update-cleanup");
                 start.ArgumentList.Add(download.StageId);
                 start.ArgumentList.Add(Environment.ProcessId.ToString());
+                if (download.HiddenHost) start.ArgumentList.Add("--control-host");
                 using var next = Process.Start(start) ?? throw new InvalidOperationException("更新后无法启动程序。");
             }
             catch (Exception ex)

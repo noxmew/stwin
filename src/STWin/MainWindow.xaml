@@ -49,6 +49,10 @@
               <MenuItem x:Name="MuteBox" Header="静音" IsCheckable="True" Click="PreferencesClick" ToolTip="下次连接时生效"/>
               <MenuItem x:Name="KeysBox" Header="系统组合键发送到分身" IsCheckable="True" Click="PreferencesClick" ToolTip="下次连接时生效"/>
               <Separator/>
+              <MenuItem x:Name="AdminSetupButton" Header="启用管理员支持" Click="AdminEnableClick"/>
+              <MenuItem x:Name="AdminStatusItem" Header="管理员支持已启用" IsEnabled="False" Visibility="Collapsed"/>
+              <MenuItem x:Name="AdminRemoveButton" Header="移除管理员支持" Click="AdminRemoveClick" Visibility="Collapsed"/>
+              <Separator/>
               <MenuItem Header="复制诊断信息" Click="DiagnosticsClick"/>
               <MenuItem x:Name="StopButton" Header="结束桌面分身" Foreground="#BE4352" Click="StopClick" IsEnabled="False"/>
               <Separator/>
@@ -101,7 +105,7 @@
           <TextBlock Text="桌面分身" FontSize="27" FontWeight="SemiBold" TextAlignment="Center" Foreground="#0F172A"/>
           <TextBlock Text="一个独立桌面，随时打开。" TextAlignment="Center" Margin="0,12,0,28" Foreground="#94A3B8" FontSize="14"/>
           <Button x:Name="StartButton" Content="启动桌面" Background="#4F46E5" Foreground="White" FontSize="14" Padding="32,13" MinWidth="160" HorizontalAlignment="Center" Click="StartClick"/>
-          <Button x:Name="ElevationButton" Content="以管理员身份重新打开" Click="ElevateClick" HorizontalAlignment="Center" Margin="0,16,0,0" Visibility="Collapsed"/>
+          <Button x:Name="ElevationButton" Content="启用管理员支持" Click="AdminEnableClick" HorizontalAlignment="Center" Margin="0,16,0,0" Visibility="Collapsed"/>
         </StackPanel>
       </Border>
       <wfi:WindowsFormsHost x:Name="DesktopView" Visibility="Collapsed"/>
