@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
@@ -75,16 +76,18 @@ internal sealed class SessionProcess : IDisposable
 
     public static uint SessionId(uint processId)
     {
-        // ProcessIdToSessionId requires QUERY_INFORMATION, which a normal helper cannot
-        // obtain for its elevated parent. TokenSessionId only needs the inspection rights we grant.
-        using var process = OpenProcess(0x1000, false, processId); // PROCESS_QUERY_LIMITED_INFORMATION
-        if (process.IsInvalid) throw Error("读取进程会话失败");
-        if (!OpenProcessToken(process, 8, out var token)) throw Error("读取进程会话令牌失败"); // TOKEN_QUERY
-        using (token)
+        // Use snapshot data without opening the peer process or token. A normal
+        // child-session helper cannot open its elevated parent's process handle.
+        var snapshot = Process.GetProcesses();
+        try
         {
-            if (!GetTokenInformation(token, 12, out var sessionId, sizeof(int), out _)) // TokenSessionId
-                throw Error("读取进程会话失败");
-            return unchecked((uint)sessionId);
+            foreach (var process in snapshot)
+                if ((uint)process.Id == processId) return checked((uint)process.SessionId);
+            throw new InvalidOperationException($"进程 {processId} 已退出，无法确认所属会话。");
+        }
+        finally
+        {
+            foreach (var process in snapshot) process.Dispose();
         }
     }
 
