@@ -23,8 +23,9 @@ internal static class Cli
         STWin.exe <命令> [--json]
 
         status                            查询运行状态、会话 ID 和连接信息
-        start                             创建并连接桌面；已有会话时请用 connect
-        connect [--session ID]            连接已有桌面，可指定会话 ID
+        start [--width W --height H]      创建并连接桌面；默认 1920 × 1080
+        connect [--session ID] [选项]     连接已有桌面，可传 --width W --height H；默认 1920 × 1080
+        resolution WIDTH HEIGHT          调整已连接桌面的分辨率，宽高为 200 至 8192 像素
         disconnect                        断开连接，保留分身中的程序
         stop --yes [--session ID]         结束桌面分身，关闭其中的程序
         quit                              断开连接并退出 STWin，保留分身
@@ -201,9 +202,33 @@ internal static class Cli
                 if (launchSession is not null) launch["sessionId"] = launchSession.Value;
                 return Call("launch_program", launch);
             case ["status"]: return Call("get_desktop_status", new { });
-            case ["start"]: return Call("start_desktop", new { });
-            case ["connect"]: return Call("connect_desktop", new { });
-            case ["connect", "--session", var session]: return Call("connect_desktop", new { sessionId = SessionId(session) });
+            case ["start" or "connect", .. var options]:
+                int? width = null;
+                int? height = null;
+                uint? desktopSession = null;
+                for (var index = 0; index < options.Length; index++)
+                {
+                    if (options[index] == "--width" && width is null && index + 1 < options.Length)
+                        width = Number(options[++index]);
+                    else if (options[index] == "--height" && height is null && index + 1 < options.Length)
+                        height = Number(options[++index]);
+                    else if (args[0] == "connect" && options[index] == "--session" && desktopSession is null && index + 1 < options.Length)
+                        desktopSession = SessionId(options[++index]);
+                    else throw new ArgumentException("start 选项为 --width W --height H；connect 还可指定 --session ID；选项不能重复。");
+                }
+                if (width.HasValue != height.HasValue) throw new ArgumentException("请同时指定 --width 和 --height。");
+                var desktop = new Dictionary<string, object>();
+                if (width.HasValue)
+                {
+                    var size = new DesktopResolution(width.Value, height!.Value);
+                    desktop["width"] = size.Width;
+                    desktop["height"] = size.Height;
+                }
+                if (desktopSession.HasValue) desktop["sessionId"] = desktopSession.Value;
+                return Call(args[0] == "start" ? "start_desktop" : "connect_desktop", desktop);
+            case ["resolution", var resolutionWidth, var resolutionHeight]:
+                var resolution = new DesktopResolution(Number(resolutionWidth), Number(resolutionHeight));
+                return Call("set_desktop_resolution", new { width = resolution.Width, height = resolution.Height });
             case ["disconnect"]: return Call("disconnect_desktop", new { });
             case ["stop", "--yes"]: return Call("stop_desktop", new { confirm = true });
             case ["stop", "--yes", "--session", var session]: return Call("stop_desktop", new { confirm = true, sessionId = SessionId(session) });

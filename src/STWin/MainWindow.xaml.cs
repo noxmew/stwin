@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private readonly Settings settings = Settings.Load();
     private readonly RdpHost host = new();
     private readonly RdpConnectionBarTracker connectionBarTracker = new();
+    private readonly DesktopConnection connection;
     private readonly SessionController controller;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly CancellationTokenSource lifetime = new();
@@ -69,7 +70,8 @@ public partial class MainWindow : Window
         host.MinimizeRequested += () => Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(MinimizeNativeFullscreen));
         connectionBarTracker.MonitorMismatch += monitor =>
             Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => ReanchorNativeFullscreen(monitor)));
-        controller = new(new SessionPlatform(), new DesktopConnection(host, settings));
+        connection = new DesktopConnection(host, settings);
+        controller = new(new SessionPlatform(), connection);
         DesktopView.Child = host;
         Width = Math.Clamp(settings.Width, 920, 3840);
         Height = Math.Clamp(settings.Height, 580, 2160);
@@ -420,6 +422,7 @@ public partial class MainWindow : Window
             UpdateLayout();
             host.CreateControl();
             Status("正在连接桌面，请留意 Windows 登录提示…");
+            connection.Resolution = DesktopResolution.Default;
             await AdminClient.EnableSessionsAsync(lifetime.Token);
             if (existing.HasValue) await controller.StartAsync(existing.Value, lifetime.Token);
             else await controller.StartAsync(false, lifetime.Token);
@@ -554,6 +557,7 @@ public partial class MainWindow : Window
                 }
                 case "start_desktop":
                 case "connect_desktop":
+                    var resolution = DesktopResolution.Parse(arguments);
                     var current = controller.RefreshSession();
                     var expected = arguments.TryGetProperty("sessionId", out var sessionArg)
                         ? sessionArg.GetUInt32() : (uint?)null;
@@ -561,6 +565,9 @@ public partial class MainWindow : Window
                     if (expected.HasValue && current != expected) throw new InvalidOperationException("指定的桌面会话不存在或已变化。");
                     if (name == "start_desktop" && current.HasValue && current != controller.ManagedId)
                         throw new InvalidOperationException($"已有桌面会话 {current.Value}，请使用 connect --session {current.Value} 连接。");
+                    if (host.ConnectionState != 0 && (arguments.TryGetProperty("width", out _) || arguments.TryGetProperty("height", out _)))
+                        throw new InvalidOperationException("桌面已连接或正在连接；连接后请使用 resolution WIDTH HEIGHT 调整分辨率。");
+                    connection.Resolution = resolution;
                     SetOperation(DesktopOperation.Connecting);
                     try
                     {
@@ -574,7 +581,12 @@ public partial class MainWindow : Window
                         connectionState = 1;
                         ErrorBanner.Visibility = Visibility.Collapsed;
                         monitoringError = false;
-                        return new("已连接桌面分身。", Data: JsonSerializer.SerializeToElement(new { sessionId = controller.ManagedId, connected = true }));
+                        var size = host.DesktopSize;
+                        return new("已连接桌面分身。", Data: JsonSerializer.SerializeToElement(new
+                        {
+                            sessionId = controller.ManagedId, connected = true,
+                            resolution = new { width = size.Width, height = size.Height }
+                        }));
                     }
                     finally { SetOperation(DesktopOperation.None); }
                 case "disconnect_desktop":
@@ -619,6 +631,12 @@ public partial class MainWindow : Window
                     host.SetFullscreen(fullscreen);
                     SetFullscreenPresentation(fullscreen);
                     return new(fullscreen ? "已开启全屏。" : "已关闭全屏。");
+                case "set_desktop_resolution":
+                    var requestedResolution = DesktopResolution.Parse(arguments, required: true);
+                    EnsureMcpDesktopAvailable();
+                    lastScreenshotSize = System.Drawing.Size.Empty;
+                    await host.SetResolutionAsync(requestedResolution, token);
+                    return new("桌面分辨率已调整。", Data: DesktopStatusSnapshot());
                 case "get_settings":
                     return new("当前设置。", Data: SettingsSnapshot());
                 case "set_settings":

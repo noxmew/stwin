@@ -234,6 +234,23 @@ internal sealed class McpServer : IDisposable
     {
         new
         {
+            name = "set_desktop_resolution",
+            description = "Change the connected clone's desktop resolution without disconnecting it. Wait for Windows to confirm the new size, then return the desktop status. Take a new screenshot before using mouse coordinates after resizing.",
+            inputSchema = new
+            {
+                type = "object",
+                properties = new
+                {
+                    width = new { type = "integer", minimum = DesktopResolution.MinimumDimension, maximum = DesktopResolution.MaximumDimension },
+                    height = new { type = "integer", minimum = DesktopResolution.MinimumDimension, maximum = DesktopResolution.MaximumDimension }
+                },
+                required = new[] { "width", "height" },
+                additionalProperties = false
+            },
+            annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = false }
+        },
+        new
+        {
             name = "launch_program",
             description = "Launch an executable in the existing STWin-managed child session. Return process ID, path, session ID, arguments, working directory, start time and actual elevation. Use an absolute path or a name on PATH; arguments are passed without a shell. The program uses the signed-in user's normal privileges by default. Set elevated to true for administrator privileges through the installed STWin backend. Complete initial authorization in STWin or with admin enable first; MCP never opens a UAC prompt. The RDP connection may be disconnected. Start or connect the clone first.",
             inputSchema = new

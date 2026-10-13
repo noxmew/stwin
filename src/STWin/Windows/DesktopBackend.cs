@@ -11,7 +11,8 @@ internal sealed class SessionPlatform : ISessionPlatform
 }
 internal sealed class DesktopConnection(RdpHost host, Settings settings) : IDesktopConnection
 {
+    public DesktopResolution Resolution { get; set; } = DesktopResolution.Default;
     public int State => host.ConnectionState;
-    public void Connect() { host.Configure(settings); host.Connect(); }
+    public void Connect() { host.Configure(settings, Resolution); host.Connect(); }
     public void Disconnect() => host.Disconnect();
 }

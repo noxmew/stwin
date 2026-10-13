@@ -6,6 +6,8 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using STWin.Infrastructure;
 
@@ -18,6 +20,7 @@ internal sealed class RdpHost : AxHost
     private static readonly Guid EventsId = new("336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6");
     private readonly Action fullscreenCallback;
     private readonly Action minimizeCallback;
+    private readonly Action<int, int> desktopSizeCallback;
     private object? eventClient;
 
     public event Action? FullscreenModeChanged;
@@ -87,6 +90,7 @@ internal sealed class RdpHost : AxHost
         Dock = DockStyle.Fill;
         fullscreenCallback = () => FullscreenModeChanged?.Invoke();
         minimizeCallback = () => MinimizeRequested?.Invoke();
+        desktopSizeCallback = (width, height) => DesktopSize = new(width, height);
     }
 
     protected override void CreateSink()
@@ -98,6 +102,7 @@ internal sealed class RdpHost : AxHost
         try
         {
             ComEventsHelper.Combine(client, EventsId, 6, fullscreenCallback); // OnLeaveFullScreenMode
+            ComEventsHelper.Combine(client, EventsId, 12, desktopSizeCallback); // OnRemoteDesktopSizeChange
             ComEventsHelper.Combine(client, EventsId, 14, minimizeCallback); // OnRequestContainerMinimize
             eventClient = client;
         }
@@ -105,6 +110,7 @@ internal sealed class RdpHost : AxHost
         {
             ComEventsHelper.Remove(client, EventsId, 5, fullscreenCallback);
             ComEventsHelper.Remove(client, EventsId, 6, fullscreenCallback);
+            ComEventsHelper.Remove(client, EventsId, 12, desktopSizeCallback);
             throw;
         }
     }
@@ -116,6 +122,7 @@ internal sealed class RdpHost : AxHost
             eventClient = null;
             ComEventsHelper.Remove(client, EventsId, 5, fullscreenCallback);
             ComEventsHelper.Remove(client, EventsId, 6, fullscreenCallback);
+            ComEventsHelper.Remove(client, EventsId, 12, desktopSizeCallback);
             ComEventsHelper.Remove(client, EventsId, 14, minimizeCallback);
         }
         base.DetachSink();
@@ -124,7 +131,7 @@ internal sealed class RdpHost : AxHost
     public int ConnectionState => IsHandleCreated ? Convert.ToInt32(Get(Client, "Connected")) : 0;
     public int DisconnectReason => Convert.ToInt32(Get(Client, "ExtendedDisconnectReason"));
     public bool IsFullscreen => IsHandleCreated && Convert.ToBoolean(Get(Client, "FullScreen"));
-    public System.Drawing.Size DesktopSize => new(Convert.ToInt32(Get(Client, "DesktopWidth")), Convert.ToInt32(Get(Client, "DesktopHeight")));
+    public Size DesktopSize { get; private set; }
 
     public (IntPtr Handle, Rectangle Bounds) RemoteViewport => FindRemoteViewport();
 
@@ -217,19 +224,17 @@ internal sealed class RdpHost : AxHost
         return (best, bestBounds);
     }
 
-    public void Configure(Settings settings)
+    public void Configure(Settings settings, DesktopResolution? resolution = null)
     {
         if (ConnectionState != 0) throw new InvalidOperationException("连接期间不能更改连接设置。");
-        // Capture the primary display's pixel dimensions once per connection.
         // Window resizing only changes presentation (SmartSizing).
-        var display = Screen.PrimaryScreen
-            ?? throw new InvalidOperationException("无法读取主显示器分辨率，请确认显示器已连接后重试。");
-        var size = display.Bounds.Size;
+        var size = resolution ?? DesktopResolution.Default;
         var client = Client;
         Put(client, "Server", "localhost");
         Put(client, "DesktopWidth", size.Width);
         Put(client, "DesktopHeight", size.Height);
-        Settings.Log($"启动分辨率：{size.Width} × {size.Height}（主显示器）");
+        DesktopSize = new(size.Width, size.Height);
+        Settings.Log($"启动分辨率：{size.Width} × {size.Height}");
         Put(client, "ColorDepth", 32);
         var advanced = Get(client, "AdvancedSettings7");
         Put(advanced, "SmartSizing", settings.SmartSizing);
@@ -248,6 +253,32 @@ internal sealed class RdpHost : AxHost
 
     public void Connect() => Call(Client, "Connect");
     public void Disconnect() { if (ConnectionState != 0) Call(Client, "Disconnect"); }
+    public async Task SetResolutionAsync(DesktopResolution resolution, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (ConnectionState != 1) throw new InvalidOperationException("只能在桌面已连接时调整分辨率。");
+        var expected = new Size(resolution.Width, resolution.Height);
+        if (DesktopSize == expected) return;
+        // IMsRdpClient9 updates the display without disconnecting the child session.
+        var client = Client;
+        client.GetType().InvokeMember("UpdateSessionDisplaySettings", BindingFlags.InvokeMethod, null, client,
+            new object[] { (uint)resolution.Width, (uint)resolution.Height, 0u, 0u, 0u, 100u, 100u });
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (DesktopSize != expected)
+            {
+                if (ConnectionState != 1) throw new InvalidOperationException("调整分辨率期间桌面连接已断开。");
+                await Task.Delay(100, timeout.Token);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Windows 未确认分辨率调整为 {expected.Width} × {expected.Height}；当前为 {DesktopSize.Width} × {DesktopSize.Height}。请用 status 查询状态。");
+        }
+        Settings.Log($"已调整分辨率：{DesktopSize.Width} × {DesktopSize.Height}");
+    }
     public void SetSizing(bool enabled) => Put(Get(Client, "AdvancedSettings7"), "SmartSizing", enabled);
     public void SetFullscreen(bool enabled)
     {
