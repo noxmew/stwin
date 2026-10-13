@@ -49,10 +49,7 @@
               <MenuItem x:Name="MuteBox" Header="静音" IsCheckable="True" Click="PreferencesClick" ToolTip="下次连接时生效"/>
               <MenuItem x:Name="KeysBox" Header="系统组合键发送到分身" IsCheckable="True" Click="PreferencesClick" ToolTip="下次连接时生效"/>
               <Separator/>
-              <MenuItem x:Name="AdminSetupButton" Header="启用管理员支持" Click="AdminEnableClick"/>
-              <MenuItem x:Name="AdminStatusItem" Header="管理员支持已启用" IsEnabled="False" Visibility="Collapsed"/>
-              <MenuItem x:Name="AdminRemoveButton" Header="移除管理员支持" Click="AdminRemoveClick" Visibility="Collapsed"/>
-              <Separator/>
+              <MenuItem x:Name="CheckUpdatesButton" Header="检查更新" Click="CheckUpdatesClick"/>
               <MenuItem Header="复制诊断信息" Click="DiagnosticsClick"/>
               <MenuItem x:Name="StopButton" Header="结束桌面分身" Foreground="#BE4352" Click="StopClick" IsEnabled="False"/>
               <Separator/>

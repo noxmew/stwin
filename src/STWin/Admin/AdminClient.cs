@@ -59,7 +59,7 @@ internal static class AdminClient
             return true;
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
-        { throw new OperationCanceledException("首次管理员授权已取消，可在“设置与更多”中主动启用。", token); }
+        { throw new OperationCanceledException("首次管理员授权已取消，可在主窗口点击“启用管理员支持”重试。", token); }
         finally { setupGate.Release(); }
     }
 

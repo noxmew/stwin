@@ -236,10 +236,7 @@ public partial class MainWindow : Window
         ElevationButton.Visibility = !adminInstalled && !previewMode ? Visibility.Visible : Visibility.Collapsed;
         ElevationButton.IsEnabled = !adminBusy;
         ElevationButton.Content = adminBusy ? "正在启用…" : "启用管理员支持";
-        AdminSetupButton.Visibility = adminInstalled ? Visibility.Collapsed : Visibility.Visible;
-        AdminSetupButton.IsEnabled = !adminBusy;
-        AdminStatusItem.Visibility = AdminRemoveButton.Visibility = adminInstalled ? Visibility.Visible : Visibility.Collapsed;
-        AdminRemoveButton.IsEnabled = !adminBusy;
+        CheckUpdatesButton.IsEnabled = !previewMode && !updateBusy && !exiting && !cliExitPending;
         UpdateAction.IsEnabled = !updateBusy && (downloadedUpdate is null || !state.Busy && !controller.Busy);
         if (connectionState == 0 && (nativeFullscreen || hiddenForFullscreen)) SetFullscreenPresentation(false);
     }
@@ -485,7 +482,7 @@ public partial class MainWindow : Window
 
     private Task<DesktopCommandResult> HandleMcpToolAsync(string name, JsonElement arguments)
     {
-        if (name is not ("get_desktop_status" or "take_screenshot" or "mouse_move" or "mouse_click" or "mouse_scroll" or "key_press" or "type_text" or "run_script" or "update_program" or "launch_program"))
+        if (name is not ("get_desktop_status" or "take_screenshot" or "mouse_move" or "mouse_click" or "mouse_scroll" or "key_press" or "type_text" or "run_script" or "update_program" or "launch_program" or "set_desktop_resolution"))
             throw new ArgumentException($"未知的 STWin MCP 工具：{name}");
         return ExecuteCommandAsync(new(name, arguments), lifetime.Token);
     }
@@ -917,33 +914,53 @@ public partial class MainWindow : Window
         finally { adminBusy = false; UpdateUi(); }
     }
 
-    private async void AdminRemoveClick(object sender, RoutedEventArgs e)
-    {
-        if (adminBusy) return;
-        adminBusy = true;
-        settings.AdminSetupAttempted = true;
-        Save();
-        UpdateUi();
-        try
-        {
-            await AdminClient.RemoveAsync(lifetime.Token);
-            adminInstalled = false;
-            ErrorBanner.Visibility = Visibility.Collapsed;
-        }
-        catch (Exception ex) { Error(ex); }
-        finally { adminBusy = false; UpdateUi(); }
-    }
-
     private void ExitClick(object sender, RoutedEventArgs e) => Close();
-    private void ShowUpdate(string message)
+    private void ShowUpdate(string message, bool showAction = true)
     {
         UpdateText.Text = message;
         UpdateAction.Content = downloadedUpdate is null ? "更新" : "重启更新";
+        UpdateAction.Visibility = showAction ? Visibility.Visible : Visibility.Collapsed;
+        UpdateLater.Content = showAction ? "稍后" : "知道了";
         UpdateBanner.Visibility = Visibility.Visible;
         UpdateLater.IsEnabled = !updateBusy || downloadedUpdate is null;
         UpdateUi();
     }
     private void DismissUpdateClick(object sender, RoutedEventArgs e) => UpdateBanner.Visibility = Visibility.Collapsed;
+    private async void CheckUpdatesClick(object sender, RoutedEventArgs e)
+    {
+        if (previewMode || exiting || cliExitPending || updateBusy) return;
+        if (downloadedUpdate is not null)
+        {
+            ShowUpdate($"{downloadedUpdate.Release.Version} 已下载。是否重启更新？分身中的程序会保留。");
+            return;
+        }
+        updateBusy = true;
+        ShowUpdate("正在检查更新…", showAction: false);
+        try
+        {
+            var release = await updates.CheckAsync(lifetime.Token);
+            if (exiting || cliExitPending) return;
+            availableUpdate = release;
+            ShowUpdate(release is null ? $"当前已是最新版本（{UpdateRelease.CurrentVersionText}）。" : $"发现新版本 {release.Version}，是否更新？",
+                showAction: release is not null);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Settings.Log($"手动检查更新失败：{ex}");
+            if (!exiting) ShowUpdate($"检查更新失败：{ex.Message}", showAction: false);
+        }
+        finally
+        {
+            updateBusy = false;
+            if (!exiting)
+            {
+                UpdateLater.IsEnabled = true;
+                UpdateUi();
+            }
+        }
+    }
+
     private async Task<DesktopCommandResult> UpdateProgramAsync(int clientProcessId, CancellationToken cancellationToken)
     {
         if (updateBusy) throw new InvalidOperationException("另一个更新操作尚未完成，请稍后重试。");
