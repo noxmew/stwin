@@ -54,7 +54,7 @@ internal static class DesktopSessionWorker
                 [Argument, sessionId.ToString(), name, Environment.ProcessId.ToString()], null, elevated);
             var launched = await ProgramLauncher.LaunchAsync(launch, token).ConfigureAwait(false);
             using var worker = SessionProcess.OpenForInspection(checked((uint)launched.ProcessId));
-            await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
+            await SessionProcess.WaitForConnectionAsync(pipe, worker, token).ConfigureAwait(false);
             var workerId = SessionProcess.PipeClientProcessId(pipe);
             if (workerId != launched.ProcessId || SessionProcess.SessionId(workerId) != sessionId ||
                 SessionProcess.UserSid(workerId) != sid.Value ||
@@ -85,12 +85,14 @@ internal static class DesktopSessionWorker
         using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
         try
         {
+            await pipe.ConnectAsync(token).ConfigureAwait(false);
+            if (SessionProcess.PipeServerProcessId(pipe) != parentId)
+                throw new UnauthorizedAccessException("桌面助手连接到了错误的 STWin 进程。");
             if (SessionProcess.SessionId((uint)Environment.ProcessId) != sessionId)
                 throw new UnauthorizedAccessException("桌面助手不在指定分身会话中。");
-            await pipe.ConnectAsync(token).ConfigureAwait(false);
             using var identity = WindowsIdentity.GetCurrent();
             var parentSession = SessionProcess.SessionId(parentId);
-            if (SessionProcess.PipeServerProcessId(pipe) != parentId || parentSession == 0 || parentSession == sessionId ||
+            if (parentSession == 0 || parentSession == sessionId ||
                 SessionProcess.UserSid(parentId) != identity.User?.Value ||
                 !string.Equals(SessionProcess.ImagePath(parentId), Environment.ProcessPath, StringComparison.OrdinalIgnoreCase))
                 throw new UnauthorizedAccessException("桌面助手没有连接到原登录会话中的 STWin。");

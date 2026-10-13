@@ -75,8 +75,17 @@ internal sealed class SessionProcess : IDisposable
 
     public static uint SessionId(uint processId)
     {
-        if (!ProcessIdToSessionId(processId, out var sessionId)) throw Error("读取进程会话失败");
-        return sessionId;
+        // ProcessIdToSessionId requires QUERY_INFORMATION, which a normal helper cannot
+        // obtain for its elevated parent. TokenSessionId only needs the inspection rights we grant.
+        using var process = OpenProcess(0x1000, false, processId); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (process.IsInvalid) throw Error("读取进程会话失败");
+        if (!OpenProcessToken(process, 8, out var token)) throw Error("读取进程会话令牌失败"); // TOKEN_QUERY
+        using (token)
+        {
+            if (!GetTokenInformation(token, 12, out var sessionId, sizeof(int), out _)) // TokenSessionId
+                throw Error("读取进程会话失败");
+            return unchecked((uint)sessionId);
+        }
     }
 
     public static string ImagePath(uint processId)
@@ -124,6 +133,28 @@ internal sealed class SessionProcess : IDisposable
         }
         if (!GetExitCodeProcess(process, out var code)) throw Error("读取后台更新结果失败");
         return checked((int)code);
+    }
+
+    internal static async Task WaitForConnectionAsync(NamedPipeServerStream pipe, SafeProcessHandle process, CancellationToken token)
+    {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var connection = pipe.WaitForConnectionAsync(wait.Token);
+        var exited = WaitForExitAsync(process, wait.Token);
+        try
+        {
+            if (await Task.WhenAny(connection, exited).ConfigureAwait(false) == exited && !pipe.IsConnected)
+            {
+                var code = await exited.ConfigureAwait(false);
+                throw new InvalidOperationException($"分身桌面助手在建立连接前退出（退出码 {code}）。");
+            }
+            await connection.ConfigureAwait(false);
+        }
+        finally
+        {
+            wait.Cancel();
+            try { await Task.WhenAll(connection, exited).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (wait.IsCancellationRequested) { }
+        }
     }
 
     internal static void AllowInspection(string userSid, int processId = 0)
@@ -235,9 +266,6 @@ internal sealed class SessionProcess : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit, out long kernel, out long user);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint timeout);

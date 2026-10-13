@@ -144,11 +144,12 @@ internal static class ProgramLauncher
         using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         try
         {
+            // Connect before validation so the caller receives bootstrap failures instead of waiting for a timeout.
+            await pipe.ConnectAsync(token).ConfigureAwait(false);
+            if (SessionProcess.PipeServerProcessId(pipe) != parentId) throw new InvalidOperationException("启动助手连接到了错误的 STWin 进程。");
             if (SessionProcess.SessionId((uint)Environment.ProcessId) != sessionId ||
                 SessionProcess.SessionId(parentId) == sessionId)
                 throw new InvalidOperationException("启动助手的分身会话不匹配。");
-            await pipe.ConnectAsync(token).ConfigureAwait(false);
-            if (SessionProcess.PipeServerProcessId(pipe) != parentId) throw new InvalidOperationException("启动助手连接到了错误的 STWin 进程。");
             var request = await CommandPipe.ReadAsync<ProgramLaunchRequest>(pipe, CommandPipe.MaximumRequest, token).ConfigureAwait(false);
             request.Validate();
             if (request.SessionId != sessionId) throw new InvalidOperationException("启动请求的分身会话不匹配。");

@@ -88,7 +88,7 @@
     </Border>
     </StackPanel>
     <Grid x:Name="DesktopArea" Grid.Row="2">
-      <Grid.Style><Style TargetType="Grid"><Setter Property="Margin" Value="12,0"/><Style.Triggers>
+      <Grid.Style><Style TargetType="Grid"><Setter Property="Margin" Value="12,0,12,12"/><Style.Triggers>
         <DataTrigger Binding="{Binding Visibility, ElementName=DesktopView}" Value="Visible"><Setter Property="Margin" Value="0"/></DataTrigger>
       </Style.Triggers></Style></Grid.Style>
       <Border Background="White" CornerRadius="18" BorderBrush="#E8EDF3" BorderThickness="1">
