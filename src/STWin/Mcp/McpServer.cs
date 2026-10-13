@@ -286,28 +286,28 @@ internal sealed class McpServer : IDisposable
         new
         {
             name = "take_screenshot",
-            description = "Capture the RDP clone surface directly and return a PNG image without activating STWin.",
+            description = "Capture the original desktop inside the child session and return a PNG at its native resolution. STWin window size, scaling and minimization do not change the capture size; STWin is not activated.",
             inputSchema = new { type = "object", properties = new { }, additionalProperties = false },
             annotations = new { readOnlyHint = true, destructiveHint = false, openWorldHint = false }
         },
         new
         {
             name = "mouse_move",
-            description = "Send a background mouse-move event to pixel coordinates from the most recent screenshot.",
+            description = "Move the mouse inside the child session using native desktop pixel coordinates from the most recent screenshot, without activating STWin.",
             inputSchema = new { type = "object", properties = new { x = new { type = "integer" }, y = new { type = "integer" } }, required = new[] { "x", "y" }, additionalProperties = false },
             annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = false }
         },
         new
         {
             name = "mouse_click",
-            description = "Send background mouse-button events at pixel coordinates from the most recent screenshot.",
+            description = "Click inside the child session using native desktop pixel coordinates from the most recent screenshot, without activating STWin.",
             inputSchema = new { type = "object", properties = new { x = new { type = "integer" }, y = new { type = "integer" }, button = new { type = "string", @enum = new[] { "left", "right", "middle" } }, count = new { type = "integer", minimum = 1, maximum = 2 } }, required = new[] { "x", "y" }, additionalProperties = false },
             annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = false }
         },
         new
         {
             name = "mouse_scroll",
-            description = "Send a background mouse-wheel event at pixel coordinates from the most recent screenshot. delta is commonly 120 or -120.",
+            description = "Scroll inside the child session using native desktop pixel coordinates from the most recent screenshot. delta is commonly 120 or -120; STWin is not activated.",
             inputSchema = new { type = "object", properties = new { x = new { type = "integer" }, y = new { type = "integer" }, delta = new { type = "integer", minimum = -1200, maximum = 1200 } }, required = new[] { "x", "y", "delta" }, additionalProperties = false },
             annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = false }
         },

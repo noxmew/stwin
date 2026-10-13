@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Imaging;
-using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -53,33 +51,6 @@ internal sealed class RdpHost : AxHost
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowVisible(IntPtr window);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PrintWindow(IntPtr window, IntPtr deviceContext, uint flags);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetDC(IntPtr window);
-
-    [DllImport("user32.dll")]
-    private static extern int ReleaseDC(IntPtr window, IntPtr deviceContext);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateCompatibleDC(IntPtr deviceContext);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateCompatibleBitmap(IntPtr deviceContext, int width, int height);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr SelectObject(IntPtr deviceContext, IntPtr drawingObject);
-
-    [DllImport("gdi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DeleteObject(IntPtr drawingObject);
-
-    [DllImport("gdi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DeleteDC(IntPtr deviceContext);
 
     [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -134,48 +105,6 @@ internal sealed class RdpHost : AxHost
     public Size DesktopSize { get; private set; }
 
     public (IntPtr Handle, Rectangle Bounds) RemoteViewport => FindRemoteViewport();
-
-    public byte[] CaptureRemotePng(out Size screenshotSize)
-    {
-        var (window, bounds) = FindRemoteViewport();
-        if (bounds.Width <= 0 || bounds.Height <= 0) throw new InvalidOperationException("无法读取分身画面窗口。");
-        screenshotSize = bounds.Size;
-        var screenDc = GetDC(IntPtr.Zero);
-        if (screenDc == IntPtr.Zero) throw new InvalidOperationException("无法创建分身截图设备上下文。");
-        IntPtr compatibleDc = IntPtr.Zero;
-        IntPtr bitmap = IntPtr.Zero;
-        IntPtr previous = IntPtr.Zero;
-        try
-        {
-            compatibleDc = CreateCompatibleDC(screenDc);
-            bitmap = CreateCompatibleBitmap(screenDc, bounds.Width, bounds.Height);
-            if (compatibleDc == IntPtr.Zero || bitmap == IntPtr.Zero) throw new InvalidOperationException("无法分配分身截图缓冲区。");
-            previous = SelectObject(compatibleDc, bitmap);
-            if (!PrintWindow(window, compatibleDc, 2)) throw new InvalidOperationException("Windows 无法从 RDP 画面窗口获取后台截图。");
-            _ = SelectObject(compatibleDc, previous);
-            previous = IntPtr.Zero;
-            using var image = Image.FromHbitmap(bitmap);
-            using var stream = new MemoryStream();
-            image.Save(stream, ImageFormat.Png);
-            return stream.ToArray();
-        }
-        finally
-        {
-            if (previous != IntPtr.Zero && compatibleDc != IntPtr.Zero) _ = SelectObject(compatibleDc, previous);
-            if (bitmap != IntPtr.Zero) _ = DeleteObject(bitmap);
-            if (compatibleDc != IntPtr.Zero) _ = DeleteDC(compatibleDc);
-            _ = ReleaseDC(IntPtr.Zero, screenDc);
-        }
-    }
-
-    public void PostRemoteMouse(IntPtr window, uint message, UIntPtr wParam, int x, int y, int screenX, int screenY, bool wheel = false)
-    {
-        var targetX = wheel ? screenX : x;
-        var targetY = wheel ? screenY : y;
-        var point = unchecked((int)((((uint)targetY & 0xffff) << 16) | ((uint)targetX & 0xffff)));
-        if (window == IntPtr.Zero || !PostMessage(window, message, wParam, new IntPtr(point)))
-            throw new InvalidOperationException($"无法向后台 RDP 画面发送鼠标事件。Windows 错误：{Marshal.GetLastWin32Error()}。");
-    }
 
     public void PostRemoteKey(IntPtr window, uint message, Keys key, int keyData)
     {

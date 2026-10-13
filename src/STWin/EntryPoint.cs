@@ -20,6 +20,8 @@ internal static class EntryPoint
             return AdminMaintenance.RunAsync(args).GetAwaiter().GetResult();
         if (args.Length > 0 && args[0] == ProgramLauncher.WorkerArgument)
             return ProgramLauncher.RunWorkerAsync(args).GetAwaiter().GetResult();
+        if (args.Length > 0 && args[0] == DesktopSessionWorker.Argument)
+            return DesktopSessionWorker.RunAsync(args).GetAwaiter().GetResult();
         if (args.Length > 0 && args[0] == UpdateWorker.Argument)
             return UpdateWorker.RunAsync(args).GetAwaiter().GetResult();
         var app = new App();

@@ -654,27 +654,19 @@ public partial class MainWindow : Window
                     return new("设置已保存；静音和系统组合键在下次连接时生效。", Data: SettingsSnapshot());
                 case "take_screenshot":
                     await PrepareAutomationTargetAsync(token);
-                    var screenshot = CaptureDesktopPng();
+                    var screenshot = await CaptureDesktopPngAsync(token);
                     return new DesktopCommandResult($"分身桌面截图，PNG 尺寸 {lastScreenshotSize.Width} × {lastScreenshotSize.Height} 像素。鼠标坐标使用此图像的像素坐标。", screenshot);
                 case "mouse_move":
                     await PrepareAutomationTargetAsync(token);
-                    var move = MapDesktopPoint(RequiredInt(arguments, "x"), RequiredInt(arguments, "y"));
-                    DesktopInput.MoveMouse(host, move.Window, move.X, move.Y, move.ScreenX, move.ScreenY);
+                    await ExecuteInDesktopAsync(name, arguments, token);
                     return new DesktopCommandResult("鼠标已移动到分身桌面指定坐标。");
                 case "mouse_click":
                     await PrepareAutomationTargetAsync(token);
-                    var click = MapDesktopPoint(RequiredInt(arguments, "x"), RequiredInt(arguments, "y"));
-                    var button = OptionalString(arguments, "button", "left");
-                    var count = OptionalInt(arguments, "count", 1);
-                    if (count is < 1 or > 2) throw new ArgumentOutOfRangeException("count", "点击次数只能为 1 或 2。");
-                    DesktopInput.ClickMouse(host, click.Window, click.X, click.Y, click.ScreenX, click.ScreenY, button, count);
+                    await ExecuteInDesktopAsync(name, arguments, token);
                     return new DesktopCommandResult("已发送鼠标点击事件。");
                 case "mouse_scroll":
                     await PrepareAutomationTargetAsync(token);
-                    var scroll = MapDesktopPoint(RequiredInt(arguments, "x"), RequiredInt(arguments, "y"));
-                    var delta = RequiredInt(arguments, "delta");
-                    if (delta is < -1200 or > 1200) throw new ArgumentOutOfRangeException("delta", "滚轮值需介于 -1200 至 1200。");
-                    DesktopInput.Scroll(host, scroll.Window, scroll.X, scroll.Y, scroll.ScreenX, scroll.ScreenY, delta);
+                    await ExecuteInDesktopAsync(name, arguments, token);
                     return new DesktopCommandResult("已发送鼠标滚轮事件。");
                 case "key_press":
                     await PrepareAutomationTargetAsync(token);
@@ -726,19 +718,22 @@ public partial class MainWindow : Window
 
     private System.Drawing.Size lastScreenshotSize;
 
-    private byte[] CaptureDesktopPng() => host.CaptureRemotePng(out lastScreenshotSize);
-
-    private (IntPtr Window, int X, int Y, int ScreenX, int ScreenY) MapDesktopPoint(int x, int y)
+    private Task<CommandReply> ExecuteInDesktopAsync(string name, JsonElement arguments, CancellationToken token)
     {
-        var viewport = host.RemoteViewport;
-        var bounds = viewport.Bounds;
-        if (bounds.Width <= 0 || bounds.Height <= 0) throw new InvalidOperationException("分身桌面当前没有可操作的显示区域。");
-        var reference = lastScreenshotSize.Width > 0 && lastScreenshotSize.Height > 0 ? lastScreenshotSize : bounds.Size;
-        if (x < 0 || x >= reference.Width || y < 0 || y >= reference.Height)
-            throw new ArgumentOutOfRangeException(nameof(x), $"坐标需位于最近截图范围 0..{reference.Width - 1} × 0..{reference.Height - 1}。");
-        var targetX = (int)((long)x * bounds.Width / reference.Width);
-        var targetY = (int)((long)y * bounds.Height / reference.Height);
-        return (viewport.Handle, targetX, targetY, bounds.Left + targetX, bounds.Top + targetY);
+        EnsureMcpDesktopAvailable();
+        var session = controller.RefreshSession();
+        if (!session.HasValue || session != controller.ManagedId)
+            throw new InvalidOperationException("当前分身会话未由 STWin 连接，请重新连接后再操作。");
+        return DesktopSessionWorker.ExecuteAsync(session.Value, new(name, arguments), host.DesktopSize, token);
+    }
+
+    private async Task<byte[]> CaptureDesktopPngAsync(CancellationToken token)
+    {
+        var reply = await ExecuteInDesktopAsync("take_screenshot", JsonSerializer.SerializeToElement(new { }), token);
+        if (reply.ImagePng is not { Length: > 0 } png || reply.Data is not { } data)
+            throw new InvalidDataException("分身桌面助手未返回截图。");
+        lastScreenshotSize = new(data.GetProperty("width").GetInt32(), data.GetProperty("height").GetInt32());
+        return png;
     }
 
     private async Task<DesktopCommandResult> RunPowerShellScriptAsync(string script, CancellationToken token)
@@ -759,7 +754,7 @@ public partial class MainWindow : Window
         await PasteTextToRemoteAsync(command, token);
         DesktopInput.PressKey(host, System.Windows.Forms.Keys.Enter, Array.Empty<System.Windows.Forms.Keys>());
         await Task.Delay(1500, token);
-        var screenshot = CaptureDesktopPng();
+        var screenshot = await CaptureDesktopPngAsync(token);
         return new DesktopCommandResult($"已在分身的 PowerShell 中提交脚本；请查看截图中的控制台输出。PowerShell 窗口会留在分身中。截图尺寸 {lastScreenshotSize.Width} × {lastScreenshotSize.Height} 像素。", screenshot);
     }
 
@@ -789,23 +784,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private static int RequiredInt(JsonElement args, string name)
-    {
-        if (args.TryGetProperty(name, out var value) && value.TryGetInt32(out var result)) return result;
-        throw new ArgumentException($"参数 {name} 必须是整数。");
-    }
-
-    private static int OptionalInt(JsonElement args, string name, int fallback)
-        => args.TryGetProperty(name, out var value) && value.TryGetInt32(out var result) ? result : fallback;
-
     private static string RequiredString(JsonElement args, string name)
     {
         if (args.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String) return value.GetString()!;
         throw new ArgumentException($"参数 {name} 必须是字符串。");
     }
-
-    private static string OptionalString(JsonElement args, string name, string fallback)
-        => args.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : fallback;
 
     private static System.Windows.Forms.Keys[] ReadModifiers(JsonElement args)
     {

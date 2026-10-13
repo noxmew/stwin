@@ -138,7 +138,7 @@ internal static class AdminClient
 
     internal static async Task<CommandReply> SendAsync(AdminRequest request, CancellationToken token, Action<CommandReply>? beforeAcknowledge = null)
     {
-        if (!Installed) throw new UnauthorizedAccessException("尚未启用管理员支持，请在菜单中启用，或执行 STWin.exe admin enable。");
+        if (!Installed) throw new UnauthorizedAccessException("尚未启用管理员支持，请在主窗口点击“启用管理员支持”，或执行 STWin.exe admin enable。");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(request.Name == "update" ? TimeSpan.FromMinutes(10) : TimeSpan.FromSeconds(75));
         await ServiceRegistration.StartAsync(UserSid, timeout.Token).ConfigureAwait(false);

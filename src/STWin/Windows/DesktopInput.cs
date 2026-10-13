@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -7,22 +8,20 @@ namespace STWin.Windows;
 
 internal static class DesktopInput
 {
-    private const uint WmMouseMove = 0x0200;
-    private const uint WmLeftButtonDown = 0x0201;
-    private const uint WmLeftButtonUp = 0x0202;
-    private const uint WmRightButtonDown = 0x0204;
-    private const uint WmRightButtonUp = 0x0205;
-    private const uint WmMiddleButtonDown = 0x0207;
-    private const uint WmMiddleButtonUp = 0x0208;
-    private const uint WmMouseWheel = 0x020A;
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
     private const uint WmSysKeyDown = 0x0104;
     private const uint WmSysKeyUp = 0x0105;
-    private const uint MkLeftButton = 0x0001;
-    private const uint MkRightButton = 0x0002;
-    private const uint MkMiddleButton = 0x0010;
     private const uint MapVirtualKeyToScanCodeEx = 4;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput { public int X, Y; public uint Data, Flags, Time; public UIntPtr ExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeInput { public uint Type; public MouseInput Mouse; }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count, NativeInput[] inputs, int size);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetKeyboardLayout(uint threadId);
@@ -30,30 +29,56 @@ internal static class DesktopInput
     [DllImport("user32.dll")]
     private static extern uint MapVirtualKeyEx(uint code, uint mapType, IntPtr keyboardLayout);
 
-    public static void MoveMouse(RdpHost host, IntPtr window, int x, int y, int screenX, int screenY)
-        => host.PostRemoteMouse(window, WmMouseMove, UIntPtr.Zero, x, y, screenX, screenY);
+    public static void MoveMouse(int x, int y) => SendMouse([MouseMove(x, y)]);
 
-    public static void ClickMouse(RdpHost host, IntPtr window, int x, int y, int screenX, int screenY, string button, int count)
+    public static void ClickMouse(int x, int y, string button, int count)
     {
-        host.PostRemoteMouse(window, WmMouseMove, UIntPtr.Zero, x, y, screenX, screenY);
-        var messages = button.ToLowerInvariant() switch
+        if (count is < 1 or > 2) throw new ArgumentOutOfRangeException(nameof(count), "点击次数只能为 1 或 2。");
+        var flags = button.ToLowerInvariant() switch
         {
-            "left" => (Down: WmLeftButtonDown, Up: WmLeftButtonUp, State: MkLeftButton),
-            "right" => (Down: WmRightButtonDown, Up: WmRightButtonUp, State: MkRightButton),
-            "middle" => (Down: WmMiddleButtonDown, Up: WmMiddleButtonUp, State: MkMiddleButton),
+            "left" => (Down: 0x0002u, Up: 0x0004u),
+            "right" => (Down: 0x0008u, Up: 0x0010u),
+            "middle" => (Down: 0x0020u, Up: 0x0040u),
             _ => throw new ArgumentException("鼠标按键只能是 left、right 或 middle。", nameof(button))
         };
+        var inputs = new List<NativeInput> { MouseMove(x, y) };
         for (var i = 0; i < count; i++)
         {
-            host.PostRemoteMouse(window, messages.Down, new UIntPtr(messages.State), x, y, screenX, screenY);
-            host.PostRemoteMouse(window, messages.Up, UIntPtr.Zero, x, y, screenX, screenY);
+            inputs.Add(new() { Mouse = new() { Flags = flags.Down } });
+            inputs.Add(new() { Mouse = new() { Flags = flags.Up } });
         }
+        SendMouse(inputs.ToArray());
     }
 
-    public static void Scroll(RdpHost host, IntPtr window, int x, int y, int screenX, int screenY, int delta)
+    public static void Scroll(int x, int y, int delta)
     {
-        var wheel = unchecked((uint)(ushort)(short)delta << 16);
-        host.PostRemoteMouse(window, WmMouseWheel, new UIntPtr(wheel), x, y, screenX, screenY, true);
+        if (delta is < -1200 or > 1200) throw new ArgumentOutOfRangeException(nameof(delta), "滚轮值需介于 -1200 至 1200。");
+        SendMouse([MouseMove(x, y), new() { Mouse = new() { Data = unchecked((uint)delta), Flags = 0x0800 } }]);
+    }
+
+    private static NativeInput MouseMove(int x, int y)
+    {
+        var bounds = SystemInformation.VirtualScreen;
+        if (bounds.Width <= 0 || bounds.Height <= 0 || !bounds.Contains(x, y))
+            throw new ArgumentOutOfRangeException(nameof(x), "鼠标坐标不在分身桌面内。");
+        return new()
+        {
+            Mouse = new()
+            {
+                X = checked((int)(((long)(x - bounds.Left) * 65536 + 32768) / bounds.Width)),
+                Y = checked((int)(((long)(y - bounds.Top) * 65536 + 32768) / bounds.Height)),
+                Flags = 0x0001 | 0x4000 | 0x8000 // MOVE | VIRTUALDESK | ABSOLUTE
+            }
+        };
+    }
+
+    private static void SendMouse(NativeInput[] inputs)
+    {
+        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeInput>()) != inputs.Length)
+        {
+            var code = Marshal.GetLastWin32Error();
+            throw new Win32Exception(code, $"Windows 未能完整发送分身鼠标事件（Windows {code}）。");
+        }
     }
 
     public static void PressKey(RdpHost host, Keys key, IReadOnlyList<Keys> modifiers)
