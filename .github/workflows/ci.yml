@@ -70,7 +70,7 @@ jobs:
           DOTNET_NOLOGO: '1'
         run: |
           $ErrorActionPreference = 'Stop'
-          $publishArguments = @('publish', 'src/STWin/STWin.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-o', 'artifacts/STWin')
+          $publishArguments = @('publish', 'src/STWin/STWin.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'false', '-o', 'artifacts/STWin')
           if ($env:RELEASE_VERSION) {
             $publishArguments += "-p:Version=$env:RELEASE_VERSION"
           }
