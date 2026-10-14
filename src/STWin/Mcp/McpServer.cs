@@ -314,7 +314,7 @@ internal sealed class McpServer : IDisposable
         new
         {
             name = "key_press",
-            description = "Send a named key directly to the RDP session, optionally with CTRL, ALT, SHIFT, or WIN; it does not require STWin to be focused.",
+            description = "Send native keyboard input inside the child session, optionally with CTRL, ALT, SHIFT, or WIN; it does not require STWin to be focused.",
             inputSchema = new { type = "object", properties = new { key = new { type = "string" }, modifiers = new { type = "array", items = new { type = "string" }, maxItems = 4 } }, required = new[] { "key" }, additionalProperties = false },
             annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = false }
         },
@@ -328,7 +328,7 @@ internal sealed class McpServer : IDisposable
         new
         {
             name = "run_script",
-            description = "Open PowerShell inside the connected clone through RDP key events, submit the supplied script through redirected clipboard, and return a background screenshot. STWin does not need focus. The script runs as the clone's signed-in user and can change files or system settings there.",
+            description = "Open PowerShell inside the connected clone through native keyboard input, submit the supplied script through redirected clipboard, and return a background screenshot. STWin does not need focus. The script runs as the clone's signed-in user and can change files or system settings there.",
             inputSchema = new { type = "object", properties = new { script = new { type = "string", minLength = 1, maxLength = 4000 } }, required = new[] { "script" }, additionalProperties = false },
             annotations = new { readOnlyHint = false, destructiveHint = true, openWorldHint = true }
         }

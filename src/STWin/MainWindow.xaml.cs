@@ -670,9 +670,7 @@ public partial class MainWindow : Window
                     return new DesktopCommandResult("已发送鼠标滚轮事件。");
                 case "key_press":
                     await PrepareAutomationTargetAsync(token);
-                    var key = DesktopInput.ParseKey(RequiredString(arguments, "key"));
-                    var modifiers = ReadModifiers(arguments);
-                    DesktopInput.PressKey(host, key, modifiers);
+                    await ExecuteInDesktopAsync(name, arguments, token);
                     return new DesktopCommandResult("已发送键盘按键事件。");
                 case "type_text":
                     await PrepareAutomationTargetAsync(token);
@@ -724,7 +722,8 @@ public partial class MainWindow : Window
         var session = controller.RefreshSession();
         if (!session.HasValue || session != controller.ManagedId)
             throw new InvalidOperationException("当前分身会话未由 STWin 连接，请重新连接后再操作。");
-        return DesktopSessionWorker.ExecuteAsync(session.Value, new(name, arguments), host.DesktopSize, token);
+        return AdminClient.ExecuteDesktopAsync(new(session.Value, new(name, arguments),
+            host.DesktopSize.Width, host.DesktopSize.Height), token);
     }
 
     private async Task<byte[]> CaptureDesktopPngAsync(CancellationToken token)
@@ -739,11 +738,11 @@ public partial class MainWindow : Window
     private async Task<DesktopCommandResult> RunPowerShellScriptAsync(string script, CancellationToken token)
     {
         await PrepareAutomationTargetAsync(token);
-        DesktopInput.PressKey(host, System.Windows.Forms.Keys.Escape, new[] { System.Windows.Forms.Keys.ControlKey });
+        await PressKeyInDesktopAsync("ESC", ["CTRL"], token);
         await Task.Delay(350, token);
         await PasteTextToRemoteAsync("powershell", token);
         await Task.Delay(700, token);
-        DesktopInput.PressKey(host, System.Windows.Forms.Keys.Enter, Array.Empty<System.Windows.Forms.Keys>());
+        await PressKeyInDesktopAsync("ENTER", [], token);
         await Task.Delay(1800, token);
 
         // Base64 keeps the submitted PowerShell on one line and the clipboard paste preserves Unicode source text.
@@ -752,7 +751,7 @@ public partial class MainWindow : Window
         if (command.Length > 7000)
             throw new InvalidOperationException("脚本编码后超过 PowerShell 控制台单行输入限制，请缩短脚本或移除多余注释。");
         await PasteTextToRemoteAsync(command, token);
-        DesktopInput.PressKey(host, System.Windows.Forms.Keys.Enter, Array.Empty<System.Windows.Forms.Keys>());
+        await PressKeyInDesktopAsync("ENTER", [], token);
         await Task.Delay(1500, token);
         var screenshot = await CaptureDesktopPngAsync(token);
         return new DesktopCommandResult($"已在分身的 PowerShell 中提交脚本；请查看截图中的控制台输出。PowerShell 窗口会留在分身中。截图尺寸 {lastScreenshotSize.Width} × {lastScreenshotSize.Height} 像素。", screenshot);
@@ -767,7 +766,7 @@ public partial class MainWindow : Window
         Clipboard.SetText(text, TextDataFormat.UnicodeText);
         try
         {
-            DesktopInput.PressKey(host, System.Windows.Forms.Keys.V, new[] { System.Windows.Forms.Keys.ControlKey });
+            await PressKeyInDesktopAsync("V", ["CTRL"], token);
             await Task.Delay(700, token);
         }
         finally
@@ -790,22 +789,8 @@ public partial class MainWindow : Window
         throw new ArgumentException($"参数 {name} 必须是字符串。");
     }
 
-    private static System.Windows.Forms.Keys[] ReadModifiers(JsonElement args)
-    {
-        if (!args.TryGetProperty("modifiers", out var value)) return Array.Empty<System.Windows.Forms.Keys>();
-        if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > 4)
-            throw new ArgumentException("参数 modifiers 必须是最多包含 4 项的数组。");
-        var keys = new System.Collections.Generic.List<System.Windows.Forms.Keys>();
-        foreach (var item in value.EnumerateArray())
-        {
-            if (item.ValueKind != JsonValueKind.String) throw new ArgumentException("修饰键名称必须是字符串。");
-            var modifier = DesktopInput.ParseKey(item.GetString()!);
-            if (modifier is not (System.Windows.Forms.Keys.ControlKey or System.Windows.Forms.Keys.ShiftKey or System.Windows.Forms.Keys.Menu or System.Windows.Forms.Keys.LWin or System.Windows.Forms.Keys.RWin))
-                throw new ArgumentException("modifiers 仅支持 CTRL、SHIFT、ALT 或 WIN。");
-            keys.Add(modifier);
-        }
-        return keys.ToArray();
-    }
+    private Task<CommandReply> PressKeyInDesktopAsync(string key, string[] modifiers, CancellationToken token)
+        => ExecuteInDesktopAsync("key_press", JsonSerializer.SerializeToElement(new { key, modifiers }), token);
 
     private void PinClick(object sender, RoutedEventArgs e) { Topmost = settings.Topmost = PinBox.IsChecked == true; Save(); }
     private void SizingClick(object sender, RoutedEventArgs e)

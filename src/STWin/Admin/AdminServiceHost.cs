@@ -106,7 +106,7 @@ internal sealed class AdminServiceHost : ServiceBase
                 }
                 catch (Exception ex) { operation = new(CommandReply.Failure(ex)); }
                 // The caller pins and authenticates maintenance processes before sending a one-byte ACK.
-                await CommandPipe.WriteAsync(pipe, operation.Reply, CommandPipe.MaximumRequest, timeout.Token).ConfigureAwait(false);
+                await CommandPipe.WriteAsync(pipe, operation.Reply, CommandPipe.MaximumReply, timeout.Token).ConfigureAwait(false);
                 if (await disconnected.ConfigureAwait(false) != 1) throw new IOException("管理员后台回复未被接收。");
                 operation.Commit?.Invoke();
                 committed = true;
@@ -159,7 +159,8 @@ internal sealed class AdminServiceHost : ServiceBase
                     SessionApi.Enable();
                     return new(new CommandReply(true, "桌面分身能力已启用。"));
                 case "launch" when request.Launch is not null:
-                    return new(await AdminSessionWorker.LaunchAsync(sid, parentSession, request.Launch, token).ConfigureAwait(false));
+                case "desktop" when request.Desktop is not null:
+                    return new(await AdminSessionWorker.ExecuteAsync(sid, parentSession, request, token).ConfigureAwait(false));
                 case "remove" when request.CleanupPipe is not null:
                     if (updates.CurrentCount == 0) throw new InvalidOperationException("后台正在下载更新，请完成后再移除。");
                     var result = await AdminMaintenance.PrepareRemoveAsync(sid, request.CleanupPipe, Stop, token).ConfigureAwait(false);

@@ -16,11 +16,13 @@ using Microsoft.Win32.SafeHandles;
 
 namespace STWin.Admin;
 
-internal sealed record AdminRequest(string Name, ProgramLaunchRequest? Launch = null, string? Version = null, string? CleanupPipe = null);
+internal sealed record AdminRequest(string Name, ProgramLaunchRequest? Launch = null, string? Version = null,
+    string? CleanupPipe = null, DesktopSessionRequest? Desktop = null);
 
 internal static class AdminClient
 {
     private static readonly SemaphoreSlim setupGate = new(1, 1);
+    private static readonly SemaphoreSlim synchronizationGate = new(1, 1);
     public static string UserSid => WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("无法确定 Windows 用户。");
     public static bool Installed => ServiceRegistration.IsInstalled(UserSid);
 
@@ -65,16 +67,29 @@ internal static class AdminClient
 
     internal static async Task SynchronizeAsync(CancellationToken token)
     {
-        if (!Installed) return;
-        var version = Version.Parse(FileVersionInfo.GetVersionInfo(ServiceRegistration.Executable(UserSid)).FileVersion!);
-        if (UpdateRelease.Normalize(version) < UpdateRelease.CurrentVersion)
-            await UpdateAsync(UpdateRelease.CurrentVersionText, token).ConfigureAwait(false);
+        await synchronizationGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            if (!Installed) return;
+            var version = Version.Parse(FileVersionInfo.GetVersionInfo(ServiceRegistration.Executable(UserSid)).FileVersion!);
+            if (UpdateRelease.Normalize(version) < UpdateRelease.CurrentVersion)
+                await UpdateAsync(UpdateRelease.CurrentVersionText, token).ConfigureAwait(false);
+        }
+        finally { synchronizationGate.Release(); }
     }
 
     public static async Task<LaunchedProgram> LaunchAsync(ProgramLaunchRequest request, CancellationToken token)
     {
         var reply = await SendAsync(new("launch", request), token).ConfigureAwait(false);
         return reply.Data?.Deserialize<LaunchedProgram>(CommandPipe.JsonOptions) ?? throw new InvalidDataException("后台未返回进程信息。");
+    }
+
+    public static async Task<CommandReply> ExecuteDesktopAsync(DesktopSessionRequest request, CancellationToken token)
+    {
+        request.Validate();
+        // Desktop requests must wait for the protected backend's startup synchronization.
+        await SynchronizeAsync(token).ConfigureAwait(false);
+        return await SendAsync(new("desktop", Desktop: request), token).ConfigureAwait(false);
     }
 
     public static async Task EnableSessionsAsync(CancellationToken token)
@@ -149,7 +164,7 @@ internal static class AdminClient
             !string.Equals(SessionProcess.ImagePath(server), ServiceRegistration.Executable(UserSid), StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("管理员后台身份不匹配。");
         await CommandPipe.WriteAsync(pipe, request, CommandPipe.MaximumRequest, timeout.Token).ConfigureAwait(false);
-        var reply = CheckReply(await CommandPipe.ReadAsync<CommandReply>(pipe, CommandPipe.MaximumRequest, timeout.Token).ConfigureAwait(false));
+        var reply = CheckReply(await CommandPipe.ReadAsync<CommandReply>(pipe, CommandPipe.MaximumReply, timeout.Token).ConfigureAwait(false));
         beforeAcknowledge?.Invoke(reply);
         await pipe.WriteAsync(new byte[] { 1 }, timeout.Token).ConfigureAwait(false);
         await pipe.FlushAsync(timeout.Token).ConfigureAwait(false);

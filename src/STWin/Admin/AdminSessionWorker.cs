@@ -14,9 +14,9 @@ internal static class AdminSessionWorker
 {
     public const string Argument = "--admin-parent-worker";
 
-    internal static async Task<CommandReply> LaunchAsync(string sid, uint parentSession, ProgramLaunchRequest request, CancellationToken token)
+    internal static async Task<CommandReply> ExecuteAsync(string sid, uint parentSession, AdminRequest request, CancellationToken token)
     {
-        request.Validate();
+        ValidateRequest(request);
         var name = $"STWin.parent.{Guid.NewGuid():N}";
         using var pipe = AdminInstallation.UserPipe(name, sid);
         using var task = new SessionLaunchTask(name, parentSession, sid, true, Argument);
@@ -28,7 +28,7 @@ internal static class AdminSessionWorker
             !string.Equals(SessionProcess.ImagePath(worker), ServiceRegistration.Executable(sid), StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("分身管理助手身份不匹配。");
         await CommandPipe.WriteAsync(pipe, request, CommandPipe.MaximumRequest, token).ConfigureAwait(false);
-        var reply = await CommandPipe.ReadAsync<CommandReply>(pipe, CommandPipe.MaximumRequest, token).ConfigureAwait(false);
+        var reply = await CommandPipe.ReadAsync<CommandReply>(pipe, CommandPipe.MaximumReply, token).ConfigureAwait(false);
         if (await SessionProcess.WaitForExitAsync(process, token).ConfigureAwait(false) != 0 && reply.Ok)
             throw new InvalidOperationException("分身管理助手没有正常退出，请检查进程状态，勿重复提交。");
         return reply;
@@ -51,26 +51,49 @@ internal static class AdminSessionWorker
                 SessionProcess.UserSid(serverId) != "S-1-5-18" ||
                 !string.Equals(SessionProcess.ImagePath(serverId), Environment.ProcessPath, StringComparison.OrdinalIgnoreCase))
                 throw new UnauthorizedAccessException("分身管理助手没有连接到系统后台。");
-            var request = await CommandPipe.ReadAsync<ProgramLaunchRequest>(pipe, CommandPipe.MaximumRequest, timeout.Token);
+            var request = await CommandPipe.ReadAsync<AdminRequest>(pipe, CommandPipe.MaximumRequest, timeout.Token);
+            ValidateRequest(request);
             // WTSGetChildSessionId is scoped to the calling session. Run this check in the parent login,
             // never in the service's Session 0, and never trust a client-supplied session ID alone.
             var disconnected = pipe.ReadAsync(new byte[1], timeout.Token).AsTask();
-            var launch = ProgramLauncher.LaunchInSessionAsync(request, timeout.Token);
-            if (await Task.WhenAny(launch, disconnected).ConfigureAwait(false) == disconnected) timeout.Cancel();
-            var result = await launch.ConfigureAwait(false);
-            await CommandPipe.WriteAsync(pipe, new CommandReply(true, "程序已在分身中启动。",
-                JsonSerializer.SerializeToElement(result, CommandPipe.JsonOptions)), CommandPipe.MaximumRequest, timeout.Token);
+            var action = request.Name == "desktop"
+                ? DesktopSessionWorker.ExecuteInParentSessionAsync(request.Desktop!, timeout.Token)
+                : LaunchProgramAsync(request.Launch!, timeout.Token);
+            if (await Task.WhenAny(action, disconnected).ConfigureAwait(false) == disconnected) timeout.Cancel();
+            var reply = await action.ConfigureAwait(false);
+            await CommandPipe.WriteAsync(pipe, reply, CommandPipe.MaximumReply, timeout.Token);
             return 0;
         }
         catch (Exception ex)
         {
+            STWin.Infrastructure.Settings.Log($"分身管理操作失败：{ex}");
             if (pipe.IsConnected && !timeout.IsCancellationRequested)
             {
-                try { await CommandPipe.WriteAsync(pipe, CommandReply.Failure(ex), CommandPipe.MaximumRequest, timeout.Token); }
+                try { await CommandPipe.WriteAsync(pipe, CommandReply.Failure(ex), CommandPipe.MaximumReply, timeout.Token); }
                 catch (Exception writeError) { STWin.Infrastructure.Settings.Log($"分身管理助手回复失败：{writeError.Message}"); }
             }
             return 1;
         }
         finally { timeout.Cancel(); }
+    }
+
+    private static void ValidateRequest(AdminRequest request)
+    {
+        switch (request.Name)
+        {
+            case "launch" when request.Launch is not null && request.Desktop is null:
+                request.Launch.Validate();
+                break;
+            case "desktop" when request.Desktop is not null && request.Launch is null:
+                request.Desktop.Validate();
+                break;
+            default: throw new ArgumentException("分身管理请求无效。");
+        }
+    }
+
+    private static async Task<CommandReply> LaunchProgramAsync(ProgramLaunchRequest request, CancellationToken token)
+    {
+        var result = await ProgramLauncher.LaunchInSessionAsync(request, token).ConfigureAwait(false);
+        return new(true, "程序已在分身中启动。", JsonSerializer.SerializeToElement(result, CommandPipe.JsonOptions));
     }
 }

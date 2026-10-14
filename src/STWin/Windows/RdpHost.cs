@@ -1,9 +1,7 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -26,35 +24,6 @@ internal sealed class RdpHost : AxHost
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int PutConnectionBarTextDelegate(IntPtr client, [MarshalAs(UnmanagedType.BStr)] string text);
-
-    private delegate bool EnumWindowCallback(IntPtr window, IntPtr state);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeRectangle { public int Left, Top, Right, Bottom; }
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr state);
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumChildWindows(IntPtr parent, EnumWindowCallback callback, IntPtr state);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetClassName(IntPtr window, StringBuilder className, int maxCount);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetWindowRect(IntPtr window, out NativeRectangle rectangle);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsWindowVisible(IntPtr window);
-
-    [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
 
     public RdpHost() : base(ClassId)
     {
@@ -103,55 +72,6 @@ internal sealed class RdpHost : AxHost
     public int DisconnectReason => Convert.ToInt32(Get(Client, "ExtendedDisconnectReason"));
     public bool IsFullscreen => IsHandleCreated && Convert.ToBoolean(Get(Client, "FullScreen"));
     public Size DesktopSize { get; private set; }
-
-    public (IntPtr Handle, Rectangle Bounds) RemoteViewport => FindRemoteViewport();
-
-    public void PostRemoteKey(IntPtr window, uint message, Keys key, int keyData)
-    {
-        if (window == IntPtr.Zero || !PostMessage(window, message, new UIntPtr((uint)key), new IntPtr(keyData)))
-            throw new InvalidOperationException($"无法向后台 RDP 画面发送键盘事件。Windows 错误：{Marshal.GetLastWin32Error()}。");
-    }
-
-    private (IntPtr Handle, Rectangle Bounds) FindRemoteViewport()
-    {
-        var roots = new List<IntPtr>();
-        _ = EnumWindows((window, _) =>
-        {
-            GetWindowThreadProcessId(window, out var processId);
-            if (processId == (uint)Environment.ProcessId) roots.Add(window);
-            return true;
-        }, IntPtr.Zero);
-
-        IntPtr best = IntPtr.Zero;
-        Rectangle bestBounds = Rectangle.Empty;
-        var bestVisible = false;
-        long bestArea = 0;
-        void Consider(IntPtr window)
-        {
-            var className = new StringBuilder(128);
-            if (GetClassName(window, className, className.Capacity) == 0 || className.ToString() != "OPWindowClass") return;
-            if (!GetWindowRect(window, out var rect)) return;
-            var bounds = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
-            var area = (long)bounds.Width * bounds.Height;
-            if (area <= 0) return;
-            var visible = IsWindowVisible(window);
-            if ((visible && !bestVisible) || (visible == bestVisible && area > bestArea))
-            {
-                best = window;
-                bestBounds = bounds;
-                bestVisible = visible;
-                bestArea = area;
-            }
-        }
-
-        foreach (var root in roots)
-        {
-            Consider(root);
-            _ = EnumChildWindows(root, (window, _) => { Consider(window); return true; }, IntPtr.Zero);
-        }
-        if (best == IntPtr.Zero) throw new InvalidOperationException("没有找到 RDP 分身画面窗口。");
-        return (best, bestBounds);
-    }
 
     public void Configure(Settings settings, DesktopResolution? resolution = null)
     {
