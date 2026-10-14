@@ -2,13 +2,21 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace STWin.Windows;
 
+internal sealed record KeyPressDelivery(string Key, int HoldMs, uint ForegroundProcessId, string ForegroundWindowTitle);
+
 internal static class DesktopInput
 {
     private const uint MapVirtualKeyToScanCodeEx = 4;
+    public const int DefaultHoldMs = 100;
+    public const int DefaultIntervalMs = 0;
+    public const int MaximumDurationMs = 10000;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MouseInput { public int X, Y; public uint Data, Flags, Time; public UIntPtr ExtraInfo; }
@@ -38,14 +46,19 @@ internal static class DesktopInput
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr window, StringBuilder text, int maximum);
+
     [DllImport("user32.dll")]
     private static extern uint MapVirtualKeyEx(uint code, uint mapType, IntPtr keyboardLayout);
 
     public static void MoveMouse(int x, int y) => SendEvents([MouseMove(x, y)], "鼠标");
 
-    public static void ClickMouse(int x, int y, string button, int count)
+    public static async Task ClickMouseAsync(int x, int y, string button, int count, int holdMs, int intervalMs, CancellationToken token)
     {
         if (count is < 1 or > 2) throw new ArgumentOutOfRangeException(nameof(count), "点击次数只能为 1 或 2。");
+        ValidateDuration(holdMs, nameof(holdMs));
+        ValidateDuration(intervalMs, nameof(intervalMs));
         var flags = button.ToLowerInvariant() switch
         {
             "left" => (Down: 0x0002u, Up: 0x0004u),
@@ -53,13 +66,23 @@ internal static class DesktopInput
             "middle" => (Down: 0x0020u, Up: 0x0040u),
             _ => throw new ArgumentException("鼠标按键只能是 left、right 或 middle。", nameof(button))
         };
-        var inputs = new List<NativeInput> { MouseMove(x, y) };
+        token.ThrowIfCancellationRequested();
+        SendEvents([MouseMove(x, y)], "鼠标");
         for (var i = 0; i < count; i++)
         {
-            inputs.Add(new() { Data = new() { Mouse = new() { Flags = flags.Down } } });
-            inputs.Add(new() { Data = new() { Mouse = new() { Flags = flags.Up } } });
+            uint pressed = 0;
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                SendEvents([new() { Data = new() { Mouse = new() { Flags = flags.Down } } }], "鼠标", out pressed);
+                await Task.Delay(holdMs, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (pressed > 0) SendEvents([new() { Data = new() { Mouse = new() { Flags = flags.Up } } }], "鼠标");
+            }
+            if (i + 1 < count) await Task.Delay(intervalMs, token).ConfigureAwait(false);
         }
-        SendEvents(inputs.ToArray(), "鼠标");
     }
 
     public static void Scroll(int x, int y, int delta)
@@ -88,25 +111,60 @@ internal static class DesktopInput
     }
 
     private static void SendEvents(NativeInput[] inputs, string device)
+        => SendEvents(inputs, device, out _);
+
+    private static void SendEvents(NativeInput[] inputs, string device, out uint sent)
     {
-        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeInput>()) != inputs.Length)
+        sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeInput>());
+        if (sent != inputs.Length)
         {
             var code = Marshal.GetLastWin32Error();
             throw new Win32Exception(code, $"Windows 未能完整发送分身{device}事件（Windows {code}）。");
         }
     }
 
-    public static void PressKey(Keys key, IReadOnlyList<Keys> modifiers)
+    public static async Task<KeyPressDelivery> PressKeyAsync(Keys key, IReadOnlyList<Keys> modifiers, int holdMs, CancellationToken token)
     {
+        ValidateDuration(holdMs, nameof(holdMs));
+        token.ThrowIfCancellationRequested();
         var window = GetForegroundWindow();
-        var thread = window == IntPtr.Zero ? 0 : GetWindowThreadProcessId(window, out _);
+        if (window == IntPtr.Zero) throw new InvalidOperationException("分身桌面没有活动窗口，请先点击要操作的窗口。");
+        var thread = GetWindowThreadProcessId(window, out var processId);
+        if (thread == 0) throw new InvalidOperationException("无法确定分身桌面当前活动窗口。");
         var layout = GetKeyboardLayout(thread);
-        var inputs = new List<NativeInput>(modifiers.Count * 2 + 2);
-        foreach (var modifier in modifiers) inputs.Add(KeyEvent(modifier, false, layout));
-        inputs.Add(KeyEvent(key, false, layout));
-        inputs.Add(KeyEvent(key, true, layout));
-        for (var i = modifiers.Count - 1; i >= 0; i--) inputs.Add(KeyEvent(modifiers[i], true, layout));
-        SendEvents(inputs.ToArray(), "键盘");
+        if (layout == IntPtr.Zero) throw new InvalidOperationException("无法读取分身活动窗口的键盘布局。");
+        var title = new StringBuilder(1024);
+        GetWindowTextW(window, title, title.Capacity);
+        var down = new NativeInput[modifiers.Count + 1];
+        var up = new NativeInput[down.Length];
+        for (var i = 0; i < modifiers.Count; i++)
+        {
+            down[i] = KeyEvent(modifiers[i], false, layout);
+            up[up.Length - 1 - i] = KeyEvent(modifiers[i], true, layout);
+        }
+        down[^1] = KeyEvent(key, false, layout);
+        up[0] = KeyEvent(key, true, layout);
+        uint pressed = 0;
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            SendEvents(down, "键盘", out pressed);
+            // Games that poll key state once per frame can miss a down/up in the same batch.
+            await Task.Delay(holdMs, token).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Release every injected key even on cancellation or a partial key-down failure.
+            if (pressed > 0) SendEvents(up[(up.Length - checked((int)pressed))..], "键盘");
+        }
+        return new(key.ToString(), holdMs, processId, title.ToString());
+    }
+
+    public static int ValidateDuration(int milliseconds, string name)
+    {
+        if (milliseconds is < 0 or > MaximumDurationMs)
+            throw new ArgumentOutOfRangeException(name, $"参数 {name} 需介于 0 至 {MaximumDurationMs} 毫秒。");
+        return milliseconds;
     }
 
     public static Keys ParseKey(string value)

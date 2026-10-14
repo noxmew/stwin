@@ -300,8 +300,8 @@ internal sealed class McpServer : IDisposable
         new
         {
             name = "mouse_click",
-            description = "Click inside the child session using native desktop pixel coordinates from the most recent screenshot, without activating STWin.",
-            inputSchema = new { type = "object", properties = new { x = new { type = "integer" }, y = new { type = "integer" }, button = new { type = "string", @enum = new[] { "left", "right", "middle" } }, count = new { type = "integer", minimum = 1, maximum = 2 } }, required = new[] { "x", "y" }, additionalProperties = false },
+            description = "Click inside the child session using native desktop pixel coordinates from the most recent screenshot, without activating STWin. holdMs controls how long each press lasts (default 100 ms); intervalMs controls the gap between clicks when count is 2 (default 0 ms). Success confirms Windows accepted the events.",
+            inputSchema = new { type = "object", properties = new { x = new { type = "integer" }, y = new { type = "integer" }, button = new { type = "string", @enum = new[] { "left", "right", "middle" } }, count = new { type = "integer", minimum = 1, maximum = 2 }, holdMs = new { type = "integer", minimum = 0, maximum = DesktopInput.MaximumDurationMs, @default = DesktopInput.DefaultHoldMs }, intervalMs = new { type = "integer", minimum = 0, maximum = DesktopInput.MaximumDurationMs, @default = DesktopInput.DefaultIntervalMs } }, required = new[] { "x", "y" }, additionalProperties = false },
             annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = false }
         },
         new
@@ -314,8 +314,8 @@ internal sealed class McpServer : IDisposable
         new
         {
             name = "key_press",
-            description = "Send native keyboard input inside the child session, optionally with CTRL, ALT, SHIFT, or WIN; it does not require STWin to be focused.",
-            inputSchema = new { type = "object", properties = new { key = new { type = "string" }, modifiers = new { type = "array", items = new { type = "string" }, maxItems = 4 } }, required = new[] { "key" }, additionalProperties = false },
+            description = "Send native keyboard input inside the child session, optionally with CTRL, ALT, SHIFT, or WIN. holdMs controls how long the key and modifiers are held before release (default 100 ms). STWin does not need focus. The result reports the foreground window title and process ID captured before input; success confirms Windows accepted the events.",
+            inputSchema = new { type = "object", properties = new { key = new { type = "string" }, modifiers = new { type = "array", items = new { type = "string" }, maxItems = 4 }, holdMs = new { type = "integer", minimum = 0, maximum = DesktopInput.MaximumDurationMs, @default = DesktopInput.DefaultHoldMs } }, required = new[] { "key" }, additionalProperties = false },
             annotations = new { readOnlyHint = false, destructiveHint = false, openWorldHint = false }
         },
         new

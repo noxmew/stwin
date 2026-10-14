@@ -126,7 +126,11 @@ internal static class DesktopSessionWorker
             if (bounds.Width != request.Width || bounds.Height != request.Height)
                 throw new InvalidOperationException($"分身桌面当前为 {bounds.Width} × {bounds.Height}，与请求的 {request.Width} × {request.Height} 不一致；请重新获取桌面状态和截图。");
             token.ThrowIfCancellationRequested();
-            var reply = Execute(request.Command, bounds);
+            // A disconnected caller must also interrupt a held key or mouse button.
+            var disconnected = pipe.ReadAsync(new byte[1], token).AsTask();
+            var action = ExecuteAsync(request.Command, bounds, token);
+            if (await Task.WhenAny(action, disconnected).ConfigureAwait(false) == disconnected) timeout.Cancel();
+            var reply = await action.ConfigureAwait(false);
             await CommandPipe.WriteAsync(pipe, reply, CommandPipe.MaximumReply, token).ConfigureAwait(false);
             return 0;
         }
@@ -141,9 +145,10 @@ internal static class DesktopSessionWorker
             }
             return reply.ExitCode;
         }
+        finally { timeout.Cancel(); }
     }
 
-    private static CommandReply Execute(DesktopCommand command, Rectangle bounds)
+    private static async Task<CommandReply> ExecuteAsync(DesktopCommand command, Rectangle bounds, CancellationToken token)
     {
         if (command.Arguments.ValueKind != JsonValueKind.Object)
             throw new ArgumentException("桌面操作参数必须是 JSON 对象。");
@@ -164,8 +169,10 @@ internal static class DesktopSessionWorker
         {
             if (!arguments.TryGetProperty("key", out var key) || key.ValueKind != JsonValueKind.String)
                 throw new ArgumentException("参数 key 必须是字符串。");
-            DesktopInput.PressKey(DesktopInput.ParseKey(key.GetString()!), ReadModifiers(arguments));
-            return new(true, "已在分身桌面中发送键盘事件。");
+            var delivery = await DesktopInput.PressKeyAsync(DesktopInput.ParseKey(key.GetString()!), ReadModifiers(arguments),
+                ReadDuration(arguments, "holdMs", DesktopInput.DefaultHoldMs), token).ConfigureAwait(false);
+            return new(true, $"已发送 {delivery.Key} 按键，按住 {delivery.HoldMs} 毫秒后松开。",
+                JsonSerializer.SerializeToElement(delivery, CommandPipe.JsonOptions));
         }
         var x = RequiredInt(arguments, "x");
         var y = RequiredInt(arguments, "y");
@@ -185,14 +192,20 @@ internal static class DesktopSessionWorker
                     button = buttonArg.GetString()!;
                 }
                 var count = arguments.TryGetProperty("count", out _) ? RequiredInt(arguments, "count") : 1;
-                DesktopInput.ClickMouse(bounds.Left + x, bounds.Top + y, button, count);
-                break;
+                var holdMs = ReadDuration(arguments, "holdMs", DesktopInput.DefaultHoldMs);
+                var intervalMs = ReadDuration(arguments, "intervalMs", DesktopInput.DefaultIntervalMs);
+                await DesktopInput.ClickMouseAsync(bounds.Left + x, bounds.Top + y, button, count, holdMs, intervalMs, token).ConfigureAwait(false);
+                return new(true, $"已发送 {count} 次鼠标点击，每次按住 {holdMs} 毫秒后松开。",
+                    JsonSerializer.SerializeToElement(new { x, y, button, count, holdMs, intervalMs }, CommandPipe.JsonOptions));
             case "mouse_scroll":
                 DesktopInput.Scroll(bounds.Left + x, bounds.Top + y, RequiredInt(arguments, "delta"));
                 break;
         }
         return new(true, "已在分身桌面中发送鼠标事件。");
     }
+
+    private static int ReadDuration(JsonElement arguments, string name, int defaultValue)
+        => arguments.TryGetProperty(name, out _) ? DesktopInput.ValidateDuration(RequiredInt(arguments, name), name) : defaultValue;
 
     private static Keys[] ReadModifiers(JsonElement arguments)
     {

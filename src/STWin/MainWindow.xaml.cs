@@ -662,16 +662,16 @@ public partial class MainWindow : Window
                     return new DesktopCommandResult("鼠标已移动到分身桌面指定坐标。");
                 case "mouse_click":
                     await PrepareAutomationTargetAsync(token);
-                    await ExecuteInDesktopAsync(name, arguments, token);
-                    return new DesktopCommandResult("已发送鼠标点击事件。");
+                    var mouseReply = await ExecuteInDesktopAsync(name, arguments, token);
+                    return new DesktopCommandResult(mouseReply.Message, Data: mouseReply.Data);
                 case "mouse_scroll":
                     await PrepareAutomationTargetAsync(token);
                     await ExecuteInDesktopAsync(name, arguments, token);
                     return new DesktopCommandResult("已发送鼠标滚轮事件。");
                 case "key_press":
                     await PrepareAutomationTargetAsync(token);
-                    await ExecuteInDesktopAsync(name, arguments, token);
-                    return new DesktopCommandResult("已发送键盘按键事件。");
+                    var keyReply = await ExecuteInDesktopAsync(name, arguments, token);
+                    return new DesktopCommandResult(keyReply.Message, Data: keyReply.Data);
                 case "type_text":
                     await PrepareAutomationTargetAsync(token);
                     var text = RequiredString(arguments, "text");

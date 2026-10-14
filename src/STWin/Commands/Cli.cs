@@ -35,10 +35,11 @@ internal static class Cli
         settings set NAME true|false      修改 topmost、smart-sizing、muted、remote-keys
         screenshot FILE.png               保存截图；文件不能已存在
         mouse move X Y                    移动鼠标
-        mouse click X Y [BUTTON]          点击；BUTTON 为 left、right、middle
-        mouse click X Y BUTTON --double   双击
+        mouse click X Y [BUTTON] [选项]   点击；BUTTON 为 left、right、middle
+          --double                       双击
+          --hold-ms MS / --interval-ms MS 每次按住时长 / 双击间隔，范围 0 至 10000 毫秒
         mouse scroll X Y DELTA            滚轮，DELTA 介于 -1200 至 1200
-        key CTRL+SHIFT+A                  按键或组合键
+        key CTRL+SHIFT+A [--hold-ms MS]   按键或组合键；按住时长为 0 至 10000 毫秒
         text [--] "内容"                  输入文本；-- 后的内容按原文处理
         text --file FILE.txt              从本机 UTF-8 文件读取文本
         script FILE.ps1 [--output PNG]    向分身 PowerShell 提交脚本，可保存截图
@@ -54,6 +55,7 @@ internal static class Cli
         超时为 4，权限不足为 5，取消为 130。script 返回成功表示脚本已提交。
         start、connect、show、stop、settings、update 在需要时启动 STWin。
         命令作用于当前用户和登录会话；首次授权后无需管理员终端。
+        按键和鼠标点击默认按住 100 毫秒；--hold-ms 0 表示立即松开，双击间隔默认 0 毫秒。
         交互式 PowerShell 请用 STWin.exe status | Out-Host 等待命令结束；
         CMD 使用 start /wait "" STWin.exe status。脚本或 PowerShell 管道可读取输出和退出码。
         """;
@@ -247,21 +249,26 @@ internal static class Cli
                 return Call("set_settings", new Dictionary<string, bool> { [key] = enabled });
             case ["screenshot", var path]: return Call("take_screenshot", new { }, path);
             case ["mouse", "move", var x, var y]: return Call("mouse_move", new { x = Number(x), y = Number(y) });
-            case ["mouse", "click", var x, var y]: return Click(x, y, "left", 1);
-            case ["mouse", "click", var x, var y, var button]: return Click(x, y, button, 1);
-            case ["mouse", "click", var x, var y, var button, "--double"]: return Click(x, y, button, 2);
+            case ["mouse", "click", var x, var y, .. var clickOptions]: return Click(x, y, clickOptions);
             case ["mouse", "scroll", var x, var y, var delta]:
                 var amount = Number(delta);
                 if (amount is < -1200 or > 1200) throw new ArgumentException("滚轮值需介于 -1200 至 1200。");
                 return Call("mouse_scroll", new { x = Number(x), y = Number(y), delta = amount });
-            case ["key", var chord]:
+            case ["key", var chord, .. var keyOptions]:
                 var parts = chord.Split('+', StringSplitOptions.TrimEntries);
                 if (parts.Length is < 1 or > 5 || parts.Any(string.IsNullOrEmpty)) throw new ArgumentException("组合键格式为 CTRL+SHIFT+A，最多 4 个修饰键。");
                 _ = DesktopInput.ParseKey(parts[^1]);
                 var modifiers = parts[..^1];
                 if (modifiers.Any(item => item.ToUpperInvariant() is not ("CTRL" or "SHIFT" or "ALT" or "WIN")))
                     throw new ArgumentException("修饰键只能是 CTRL、SHIFT、ALT 或 WIN。");
-                return Call("key_press", new { key = parts[^1], modifiers });
+                int? keyHoldMs = null;
+                for (var index = 0; index < keyOptions.Length; index++)
+                {
+                    if (keyOptions[index] == "--hold-ms" && keyHoldMs is null && index + 1 < keyOptions.Length)
+                        keyHoldMs = DesktopInput.ValidateDuration(Number(keyOptions[++index]), "holdMs");
+                    else throw new ArgumentException("key 选项为 --hold-ms MS，不能重复。");
+                }
+                return Call("key_press", new { key = parts[^1], modifiers, holdMs = keyHoldMs ?? DesktopInput.DefaultHoldMs });
             case ["text", "--file"]: throw new ArgumentException("text --file 需要指定本机文件路径。");
             case ["text", var text]: return Text(text);
             case ["text", "--", var text]: return Text(text);
@@ -277,10 +284,24 @@ internal static class Cli
             if (path is not null && File.Exists(path)) throw new ArgumentException($"输出文件已存在：{path}");
             return new(new(name, JsonSerializer.SerializeToElement(payload)), json, path);
         }
-        CliInvocation Click(string x, string y, string button, int count)
+        CliInvocation Click(string x, string y, string[] options)
         {
-            if (button is not ("left" or "right" or "middle")) throw new ArgumentException("鼠标按键只能是 left、right 或 middle。");
-            return Call("mouse_click", new { x = Number(x), y = Number(y), button, count });
+            string? button = null;
+            var count = 1;
+            int? holdMs = null;
+            int? intervalMs = null;
+            for (var index = 0; index < options.Length; index++)
+            {
+                if (button is null && options[index] is ("left" or "right" or "middle")) button = options[index];
+                else if (options[index] == "--double" && count == 1) count = 2;
+                else if (options[index] == "--hold-ms" && holdMs is null && index + 1 < options.Length)
+                    holdMs = DesktopInput.ValidateDuration(Number(options[++index]), "holdMs");
+                else if (options[index] == "--interval-ms" && intervalMs is null && index + 1 < options.Length)
+                    intervalMs = DesktopInput.ValidateDuration(Number(options[++index]), "intervalMs");
+                else throw new ArgumentException("mouse click 支持 left、right、middle、--double、--hold-ms MS、--interval-ms MS，选项不能重复。");
+            }
+            return Call("mouse_click", new { x = Number(x), y = Number(y), button = button ?? "left", count,
+                holdMs = holdMs ?? DesktopInput.DefaultHoldMs, intervalMs = intervalMs ?? DesktopInput.DefaultIntervalMs });
         }
         CliInvocation Text(string text)
         {
