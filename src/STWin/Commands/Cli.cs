@@ -23,13 +23,12 @@ internal static class Cli
         STWin.exe <命令> [--json]
 
         status                            查询运行状态、会话 ID 和连接信息
-        start [--width W --height H]      创建并连接桌面；默认 1920 × 1080
-        connect [--session ID] [选项]     连接已有桌面，可传 --width W --height H；默认 1920 × 1080
+        start [--width W --height H]      创建、连接并显示桌面；默认 1920 × 1080
+        connect [--session ID] [选项]     连接并显示已有桌面，可传 --width W --height H；默认 1920 × 1080
         resolution WIDTH HEIGHT          调整已连接桌面的分辨率，宽高为 200 至 8192 像素
         disconnect                        断开连接，保留分身中的程序
         stop --yes [--session ID]         结束桌面分身，关闭其中的程序
         quit                              断开连接并退出 STWin，保留分身
-        show / hide                       显示 / 隐藏主窗口
         fullscreen on|off                 开启 / 关闭全屏
         settings                          查询设置
         settings set NAME true|false      修改 topmost、smart-sizing、muted、remote-keys
@@ -53,7 +52,7 @@ internal static class Cli
 
         --json 返回 JSON；成功退出码为 0，失败为 1，参数错误为 2，状态冲突为 3，
         超时为 4，权限不足为 5，取消为 130。script 返回成功表示脚本已提交。
-        start、connect、show、stop、settings、update 在需要时启动 STWin。
+        start、connect、stop、settings、update 在需要时启动 STWin。
         命令作用于当前用户和登录会话；首次授权后无需管理员终端。
         按键和鼠标点击默认按住 100 毫秒；--hold-ms 0 表示立即松开，双击间隔默认 0 毫秒。
         交互式 PowerShell 请用 STWin.exe status | Out-Host 等待命令结束；
@@ -146,11 +145,10 @@ internal static class Cli
             if (command.Name == "get_desktop_status")
                 return new(true, "STWin 未运行。", DesktopStatus.NotRunning());
             if (command.Name == "quit") return new(true, "STWin 未运行。");
-            if (command.Name is not ("start_desktop" or "connect_desktop" or "show" or "stop_desktop" or "get_settings" or "set_settings" or "update_program"))
+            if (command.Name is not ("start_desktop" or "connect_desktop" or "stop_desktop" or "get_settings" or "set_settings" or "update_program"))
                 throw new InvalidOperationException("STWin 未运行。请先执行 start 或 connect。");
             // Shell launch keeps the resident GUI from inheriting the CLI's output pipe.
             var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true };
-            start.ArgumentList.Add("--control-host");
             using var host = Process.Start(start) ?? throw new InvalidOperationException("无法启动 STWin。");
         }
         using var pipe = new NamedPipeClientStream(".", InstanceIdentity.PipeName, PipeDirection.InOut,
@@ -236,7 +234,7 @@ internal static class Cli
             case ["stop", "--yes", "--session", var session]: return Call("stop_desktop", new { confirm = true, sessionId = SessionId(session) });
             case ["stop", "--session", var session, "--yes"]: return Call("stop_desktop", new { confirm = true, sessionId = SessionId(session) });
             case ["stop", ..]: throw new ArgumentException("结束分身会关闭其中的程序，请显式使用 stop --yes [--session ID]。");
-            case ["quit" or "show" or "hide"]: return Call(args[0], new { });
+            case ["quit"]: return Call("quit", new { });
             case ["fullscreen", "on" or "off"]: return Call("set_fullscreen", new { enabled = args[1] == "on" });
             case ["settings"]: return Call("get_settings", new { });
             case ["settings", "set", var name, var value]:

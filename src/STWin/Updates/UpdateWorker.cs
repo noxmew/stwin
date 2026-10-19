@@ -124,7 +124,6 @@ internal static class UpdateWorker
                 start.ArgumentList.Add("--update-cleanup");
                 start.ArgumentList.Add(download.StageId);
                 start.ArgumentList.Add(Environment.ProcessId.ToString());
-                if (download.HiddenHost) start.ArgumentList.Add("--control-host");
                 using var next = Process.Start(start) ?? throw new InvalidOperationException("更新后无法启动程序。");
             }
             catch (Exception ex)

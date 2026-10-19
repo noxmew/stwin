@@ -42,7 +42,6 @@ public partial class MainWindow : Window
     private bool adminInstalled;
     private bool adminBusy;
     private Task? adminSynchronization;
-    internal bool ControlHidden { get; private set; }
     private bool monitoringError;
     private string lastError = "无";
     private readonly bool previewMode;
@@ -126,7 +125,6 @@ public partial class MainWindow : Window
 
     public void Reveal()
     {
-        ControlHidden = false;
         if (hiddenForFullscreen)
         {
             SyncFullscreenFromHost();
@@ -568,6 +566,7 @@ public partial class MainWindow : Window
                     SetOperation(DesktopOperation.Connecting);
                     try
                     {
+                        Reveal();
                         await Dispatcher.Yield(DispatcherPriority.Loaded);
                         token.ThrowIfCancellationRequested();
                         UpdateLayout();
@@ -614,14 +613,6 @@ public partial class MainWindow : Window
                         return new("桌面分身已结束。");
                     }
                     finally { SetOperation(DesktopOperation.None); }
-                case "show":
-                    RestoreNativeFullscreen();
-                    Reveal();
-                    return new("主窗口已显示。");
-                case "hide":
-                    RestoreNativeFullscreen();
-                    HideForControl();
-                    return new("主窗口已隐藏。");
                 case "set_fullscreen":
                     EnsureMcpDesktopAvailable();
                     var fullscreen = arguments.GetProperty("enabled").GetBoolean();
@@ -853,12 +844,6 @@ public partial class MainWindow : Window
     }
     internal void ShowStartupError(Exception error) => Error(error);
 
-    internal void HideForControl()
-    {
-        ControlHidden = true;
-        Hide();
-    }
-
     private async Task SynchronizeAdminAsync()
     {
         try { await AdminClient.SynchronizeAsync(lifetime.Token); }
@@ -949,7 +934,7 @@ public partial class MainWindow : Window
             ShowUpdate($"正在下载 {release.Version}，可继续使用桌面分身。");
             if (downloadedUpdate is null || downloadedUpdate.Release != release)
                 downloadedUpdate = await updates.DownloadAsync(release, token);
-            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, token, clientProcessId, hiddenHost: ControlHidden);
+            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, token, clientProcessId);
             token.ThrowIfCancellationRequested();
             if (exiting || cliExitPending) throw new InvalidOperationException("STWin 正在退出。");
             if (controller.Busy || operation != DesktopOperation.None || confirmationOpen || !commandGate.Wait(0))
@@ -1010,7 +995,7 @@ public partial class MainWindow : Window
                 return;
             }
             ShowUpdate("正在准备更新…");
-            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, lifetime.Token, hiddenHost: ControlHidden);
+            await using var installer = await UpdateInstaller.PrepareAsync(downloadedUpdate, lifetime.Token);
             lifetime.Token.ThrowIfCancellationRequested();
             if (controller.Busy || UiState.Busy) throw new InvalidOperationException("正在处理桌面操作，请完成后再重启更新。");
             SetOperation(DesktopOperation.Disconnecting);

@@ -51,7 +51,7 @@ public partial class App : Application
             catch (Exception ex) { File.WriteAllText(output, ex.ToString()); Shutdown(1); }
             return;
         }
-        if (e.Args.Length > 0 && e.Args[0] is not ("--preview" or "--control-host" or "--update-cleanup"))
+        if (e.Args.Length > 0 && e.Args[0] is not ("--preview" or "--update-cleanup"))
         {
             Shutdown(await Cli.RunAsync(e.Args));
             return;
@@ -61,26 +61,19 @@ public partial class App : Application
         instance = new Mutex(true, name, out var created);
         if (!created)
         {
-            try { if (!e.Args.Contains("--control-host")) { using var signal = EventWaitHandle.OpenExisting(name + ".activate"); signal.Set(); } }
+            try { using var signal = EventWaitHandle.OpenExisting(name + ".activate"); signal.Set(); }
             catch (WaitHandleCannotBeOpenedException) { }
             Shutdown();
             return;
         }
         activate = new EventWaitHandle(false, EventResetMode.AutoReset, name + ".activate");
         Exception? setupError = null;
-        if (!e.Args.Contains("--preview") && !e.Args.Contains("--control-host"))
+        if (!e.Args.Contains("--preview"))
         {
             try { await AdminClient.InitializeAsync(false, CancellationToken.None, synchronize: false); }
             catch (Exception ex) { setupError = ex; }
         }
         var window = new MainWindow(e.Args.Contains("--preview"));
-        if (e.Args.Contains("--control-host"))
-        {
-            window.ShowActivated = false;
-            window.ShowInTaskbar = false;
-            window.Opacity = 0;
-            window.Loaded += (_, _) => { window.HideForControl(); window.Opacity = 1; window.ShowInTaskbar = true; };
-        }
         MainWindow = window;
         activationWait = ThreadPool.RegisterWaitForSingleObject(activate, (_, _) => Dispatcher.BeginInvoke(window.Reveal), null, Timeout.Infinite, false);
         if (e.Args.Contains("--preview"))

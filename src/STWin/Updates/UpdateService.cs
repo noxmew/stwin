@@ -168,14 +168,14 @@ internal sealed class UpdateInstaller(Process process, string temporaryPath) : I
         return Path.Combine(Path.GetDirectoryName(target)!, $".stwin-update-{download.StageId}.tmp");
     }
 
-    public static Task<UpdateInstaller> PrepareAsync(DownloadedUpdate download, CancellationToken cancellationToken, int clientProcessId = 0, bool hiddenHost = false) => Task.Run(async () =>
+    public static Task<UpdateInstaller> PrepareAsync(DownloadedUpdate download, CancellationToken cancellationToken, int clientProcessId = 0) => Task.Run(async () =>
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(11));
         var temporary = TemporaryPath(download, Environment.ProcessPath!);
         var process = new Process
         {
-            StartInfo = UpdateService.WorkerStart(download.ExecutablePath, "apply", JsonSerializer.Serialize(download with { ClientProcessId = clientProcessId, HiddenHost = hiddenHost }),
+            StartInfo = UpdateService.WorkerStart(download.ExecutablePath, "apply", JsonSerializer.Serialize(download with { ClientProcessId = clientProcessId }),
                 Environment.ProcessId.ToString(), Environment.ProcessPath!)
         };
         try

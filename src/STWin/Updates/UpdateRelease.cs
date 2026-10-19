@@ -28,7 +28,6 @@ internal sealed record UpdateRelease(string Version, string DownloadUrl, long Si
 internal sealed record DownloadedUpdate(UpdateRelease Release, string StageId)
 {
     public int ClientProcessId { get; init; }
-    public bool HiddenHost { get; init; }
     public static string StagingRoot => Path.Combine(Settings.Folder, "updates");
     public string DirectoryPath => StageDirectory(StageId);
     public string ExecutablePath => Path.Combine(DirectoryPath, "STWin.exe");
